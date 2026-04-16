@@ -1,6 +1,8 @@
 # tmva_ZdZd_R3
 Developing a TMVA for background reduction in the Run 3 H->ZdZd->4l analysis, with the help of Claude Cowork.
 
+This repository is stored online here: [github](https://github.com/rsamconn/tmva_ZdZd_R3)
+
 ## Updating CLAUDE.md
 The repo is currently just initialized with a README — as you add training scripts, config files, and workflows, the CLAUDE.md should be updated with:                                                                                        
 - How to run TMVA training (e.g., root -l train.C or Python equivalent)
@@ -38,10 +40,10 @@ should improve signal-to-background discrimination.
   - Electron transverse momentum (pT) > 5 GeV
   - _(additional cuts to be listed here)_
 - **Analysis framework:**
-    - The custom AnalysisCam framework [github]() is used for constructing multi-lepton objects.
+    - The custom AnalysisCam framework [gitlab](https://gitlab.cern.ch/atlas-phys/exot/ueh/EXOT-2016-22/AnalysisCam) is used for constructing multi-lepton objects.
     - Signal, background and ATLAS data are supplied as `.root` files in DAOD_PHYS format.
-    - These are passed into the ZdZd13TeV algorithm [github](https://gitlab.cern.ch/atlas-phys/exot/ueh/EXOT-2016-22/ZdZd13TeV/-/tree/r25_run3?ref_type=heads), which identifies events with viable lepton quadruplets and saves relevant information from them, as well as building candidate dilepton and quadruplet objects, into output Ntuples.
-    - These output Ntuples are passed through the much lighter ZdZdPostProcessing algorithm [github](https://gitlab.cern.ch/as_followups/ZdZdPostProcessing/-/tree/r25_run3_ZdZd?ref_type=heads), which performs a cutflow analysis to identify events passing a given signal region.
+    - These are passed into the ZdZd13TeV algorithm [gitlab](https://gitlab.cern.ch/atlas-phys/exot/ueh/EXOT-2016-22/ZdZd13TeV/-/tree/r25_run3?ref_type=heads), which identifies events with viable lepton quadruplets and saves relevant information from them, as well as building candidate dilepton and quadruplet objects, into output Ntuples.
+    - These output Ntuples are passed through the much lighter ZdZdPostProcessing algorithm [gitlab](https://gitlab.cern.ch/as_followups/ZdZdPostProcessing/-/tree/r25_run3_ZdZd?ref_type=heads), which performs a cutflow analysis to identify events passing a given signal region.
     - The TMVA algorithm sits somewhere between the beginning and end of the cutflow: after some cuts have been passed, such as cleaning and trigger cuts, but before too many events have been disqualified. The goal of the TMVA algorithm is to be an improved alternative to most of the remaining cutflow.
 
 ---
