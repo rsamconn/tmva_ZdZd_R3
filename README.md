@@ -187,7 +187,97 @@ as the project progresses:
 
 ---
 
-## 11. To Do / Open Questions
+## 11. Ntuple Conversion to Training Data
+
+The script `make_training_ntuples.py` (Stage 1 of the pipeline) converts
+ZdZd13TeV ROOT ntuples into a flat Parquet file ready for BDT training.
+The following decisions were made when designing this script.
+
+### Input data source
+- **Use the ZdZd13TeV `Nominal/llllTree` only.** The ZdZdPostProcessing output
+  contains only final `avgMll` histograms after the full cutflow and carries no
+  per-event information; it cannot be used for BDT training.
+- **Use the Nominal tree only**, not the systematic variation trees
+  (e.g. `EG_RESOLUTION_ALL1up/llllTree`). Systematics are applied at the
+  evaluation/statistical analysis stage.
+
+### Event preselection
+All three of the following must pass (matching `ZdZdPP_alg.cxx`):
+- `passCleaning == True`
+- `passNPV == True`
+- `passTriggers != 0`
+
+### Quadruplet selection
+For each event the first quadruplet candidate (in the order stored in the tree)
+passing **both** of the following hard cuts is selected:
+
+1. **SFOS**: `llll_charge == 0` AND `llll_dCharge == 0`
+2. **Kinematic pT** (thresholds from `ZdZdPP_alg.cxx`, in MeV):
+   - `pT(l1) >= 20 000` (leading lepton)
+   - `pT(l2) >= 15 000` (subleading)
+   - `pT(l3) >= 10 000` (subsubleading)
+   - `l1–l4` are stored in pT-descending order within each quadruplet candidate.
+
+All remaining selection quantities (isolation, dR, impact parameter, trigger
+match, muon type, …) are **not applied as hard cuts** — they are retained as
+BDT input features so the classifier can learn from them.
+
+### Feature vector
+All mass and momentum quantities are stored in **MeV** throughout, consistent
+with the ZdZd13TeV tree convention.
+
+| Column | Source | Notes |
+|---|---|---|
+| `m_4l` | `llll_tlv_m` | Four-lepton invariant mass |
+| `avgM` | `llll_avgM` | (mab + mcd) / 2 |
+| `dM` | `llll_dM` | mab − mcd |
+| `mab` | `ll_tlv_m[llll_ll1 or ll2]` | Larger of the two primary dilepton masses |
+| `mcd` | `ll_tlv_m[llll_ll1 or ll2]` | Smaller of the two primary dilepton masses |
+| `mad` | `ll_tlv_m[llll_alt_ll1]` | Alt. pairing leading dilepton mass |
+| `mbc` | `ll_tlv_m[llll_alt_ll2]` | Alt. pairing subleading dilepton mass |
+| `mcd_over_mab` | derived | mcd / mab; MediumSR discriminant |
+| `min_sf_dR` | `llll_min_sf_dR` | Min ΔR same-flavour lepton pair |
+| `min_of_dR` | `llll_min_of_dR` | Min ΔR opp.-flavour pair (**sentinel** 9999999 for 4e/4mu) |
+| `vtx_reduced_chi2` | `llll_vtx_reduced_chi2` | Quadruplet vertex χ² (**sentinel** −999) |
+| `max_el_d0Sig` | `llll_max_el_d0Sig` | Max electron \|d0/σ\| (**sentinel** −999 for 4mu) |
+| `max_mu_d0Sig` | `llll_max_mu_d0Sig` | Max muon \|d0/σ\| (**sentinel** −999 for 4e) |
+| `nCTorSA` | `llll_nCTorSA` | Number of CT or SA muons |
+| `l_isIsolCloseBy` | `llll_l_isIsolCloseBy` | Isolation bitmask (15 = all isolated) |
+| `triggerMatched` | `llll_triggerMatched` | Trigger-match bitmask |
+| `is_4e`, `is_2e2mu`, `is_4mu` | one-hot from `llll_pdgIdSum` | Quadruplet flavour |
+| `pT_l1`…`pT_l4` | `l_tlv_pt` via `llll_l1`…`l4` | Lepton pTs, pT-ordered |
+| `eta_l1`…`eta_l4` | `l_tlv_eta` via `llll_l1`…`l4` | Lepton η, same ordering |
+| `mu` | `averageInteractionsPerCrossing` | Pile-up |
+
+Columns marked **sentinel** contain placeholder values for certain quadruplet
+flavours and must be handled (excluded or imputed) in the training script
+before being passed to TMVA.
+
+### Handling multiple mZd signal samples (option a)
+A single mZd-inclusive BDT is trained using all signal samples combined.
+`truth_zdzd_avgM` (MeV) is included in the output as a feature column so the
+BDT can learn mass dependence. For background samples this column defaults to 0.
+
+### Signal / background labelling
+- `label = 1`: H→ZdZd→4ℓ signal MC (all mZd values, all MC campaigns)
+- `label = 0`: background MC (ZZ\*→4ℓ and other relevant backgrounds)
+- Signal and background files are processed separately and combined in the
+  output Parquet. The training script feeds them to TMVA's separate signal and
+  background TTrees.
+
+### H window cut
+The H window cut (115–130 GeV on m_4l) is **not applied** during conversion,
+giving the BDT access to sideband events and avoiding bias in the m_4l feature.
+
+### Output format
+Stage 1 outputs a **Parquet file** (one per run, containing all input samples).
+Stage 2 (training script) reads the Parquet, constructs flat ROOT TTrees for
+TMVA, and runs training. This separation means data preparation can be run and
+inspected without ROOT.
+
+---
+
+## 13. To Do / Open Questions
 
 The following questions are open and must be answered before the corresponding
 development steps can proceed. They will be addressed one by one.
