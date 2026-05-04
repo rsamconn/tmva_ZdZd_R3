@@ -35,16 +35,41 @@ should improve signal-to-background discrimination.
 - **Analysis name:** _Search for Higgs boson decays to four leptons via dark vector bosons_
 - **Signal process:** _e.g. H → ZdZd → ℓℓℓℓ_
 - **Background process(es):** _e.g. ZZ*, Zjets, ttbar_
-- **Existing cutflow:** A sequential set of selection cuts is currently used to
-  separate signal from background. Key cuts include (but are not limited to):
-  - Electron transverse momentum (pT) > 5 GeV
-  - _(additional cuts to be listed here)_
+- **Existing cutflow (implemented in `ZdZdPlottingAlg.cxx`):**
+  A sequential set of selection cuts is used to separate signal from background.
+  Key cuts, in order:
+  - Event preselection: `passCleaning`, `passNPV`, trigger bitmask
+  - Quadruplet SFOS: `charge == 0` and `dCharge == 0`
+  - Overlap removal: `overlaps & 54 == 0` (removes lepton–lepton overlap-removed quads)
+  - Kinematic pT: l1 ≥ 20 GeV, l2 ≥ 15 GeV, l3 ≥ 10 GeV (pT-ordered)
+  - Trigger match: `triggerMatched != 0`
+  - ΔR: `min_sf_dR > 0.1`, `min_of_dR > 0.2`
+  - Muon type: `nCTorSA < 2`
+  - Isolation: `l_isIsolCloseBy == 15` (all 4 leptons pass FixedCutLoose)
+  - Electron quality: all leptons with `quality < 3`
+  - Impact parameter: `max_el_d0Sig < 5`, `max_mu_d0Sig < 3`
+  - Quarkonia vetoes: J/ψ window (|m − 3416| < 570 MeV), Υ window (|m − 9933| < 1172 MeV),
+    applied to all four dilepton pairings (m12, m34, m32, m14)
+  - H window: 115 GeV < m_4l < 130 GeV
+  - Z veto: m12 < 64 GeV, m34 < 64 GeV, **m32 < 75 GeV, m14 < 75 GeV**
+    (primary pairings at 64 GeV, alternative pairings at 75 GeV)
+  - Loose SR: all four dilepton masses > 10 GeV
+  - Medium SR: m34/m12 ≥ 0.85 − 0.1125 × f(m12), where f is a sigmoid-like
+    modulation function centred at m12 ≈ 50 GeV (implemented in `SRModulation.cxx`)
 - **Analysis framework:**
     - The custom AnalysisCam framework [gitlab](https://gitlab.cern.ch/atlas-phys/exot/ueh/EXOT-2016-22/AnalysisCam) is used for constructing multi-lepton objects.
     - Signal, background and ATLAS data are supplied as `.root` files in DAOD_PHYS format.
-    - These are passed into the ZdZd13TeV algorithm [gitlab](https://gitlab.cern.ch/atlas-phys/exot/ueh/EXOT-2016-22/ZdZd13TeV/-/tree/r25_run3?ref_type=heads), which identifies events with viable lepton quadruplets and saves relevant information from them, as well as building candidate dilepton and quadruplet objects, into output Ntuples.
-    - These output Ntuples are passed through the much lighter ZdZdPostProcessing algorithm [gitlab](https://gitlab.cern.ch/as_followups/ZdZdPostProcessing/-/tree/r25_run3_ZdZd?ref_type=heads), which performs a cutflow analysis to identify events passing a given signal region.
-    - The TMVA algorithm sits somewhere between the beginning and end of the cutflow: after some cuts have been passed, such as cleaning and trigger cuts, but before too many events have been disqualified. The goal of the TMVA algorithm is to be an improved alternative to most of the remaining cutflow.
+    - These are passed into the **ZdZd13TeV algorithm** (`ZdZdAnalysisAlg.cxx` + `ZdZdHelper.h`),
+      which identifies events with viable lepton quadruplets, builds dilepton and quadruplet
+      objects (pT-ordering leptons l1–l4, Z-distance ordering dileptons ll1/ll2), computes
+      derived quantities (min_sf_dR, min_of_dR, d0Sig, scaleFactor, etc.), and writes output
+      ntuples to `Nominal/llllTree` (plus ~56 systematic variation trees).
+    - These output ntuples are passed through the **ZdZdPostProcessing algorithm**
+      (`ZdZdPlottingAlg.cxx`), which applies the full cutflow (see above) and fills
+      `avgMll` histograms for the final statistical analysis.
+    - The TMVA algorithm sits between event preselection (cleaning + trigger + SFOS + kinematic
+      pT) and the isolation/impact-parameter/quarkonia/ZVeto/LooseSR/MediumSR cuts. The goal
+      is for a single BDT score to replace those later cuts with better signal efficiency.
 
 ---
 
@@ -172,18 +197,26 @@ The intended workflow is:
 
 ---
 
-## 10. Assumptions
-
-The following assumptions have been made and should be confirmed or corrected
-as the project progresses:
+## 10. Assumptions and Confirmed Facts
 
 1. ROOT 6.26.06 on the local machine is compatible with the PyROOT TMVA
    interface used in this project (TMVA 4.3.0, requires ROOT ≥ 6.12).
 2. lxplus has ROOT available via CVMFS and scripts will be run with `python3`
    after sourcing the appropriate LCG release.
-3. The analysis code output contains dilepton objects and other combined
-   quantities stored as **scalar** (per-event) branches in the TTree — this
-   must be confirmed by the data exploration step.
+3. **CONFIRMED**: The output TTree is `Nominal/llllTree` inside the NTUP4L ROOT
+   file. Quadruplet quantities are stored as `vector<>` branches (one entry per
+   quadruplet candidate per event); lepton/dilepton quantities are also vectors
+   indexed by l_index / ll_index. Stage 1 flattens these to one row per event
+   (selecting the first passing quadruplet).
+4. **CONFIRMED** (from `ZdZdHelper.h`): `l1/l2/l3/l4` indices in the quadruplet
+   are pT-descending (set via `sort_Pt()`). The kinematic pT cuts in Stage 1 are
+   applied directly on these indices without re-sorting, consistent with
+   `ZdZdPlottingAlg.cxx`.
+5. **CORRECTED** (from `ZdZdHelper.h`): `max_el_d0Sig` and `max_mu_d0Sig` store
+   **0.0** (not −999) for quadruplet flavours with no electrons/muons respectively.
+   This is computed as `std::max({pdgId!=11 ? 0.0 : |d0Sig|, ...})`. The 0.0
+   value is physically meaningful and does not require special imputation before
+   BDT training.
 
 ---
 
@@ -239,8 +272,8 @@ with the ZdZd13TeV tree convention.
 | `min_sf_dR` | `llll_min_sf_dR` | Min ΔR same-flavour lepton pair |
 | `min_of_dR` | `llll_min_of_dR` | Min ΔR opp.-flavour pair (**sentinel** 9999999 for 4e/4mu) |
 | `vtx_reduced_chi2` | `llll_vtx_reduced_chi2` | Quadruplet vertex χ² (**sentinel** −999) |
-| `max_el_d0Sig` | `llll_max_el_d0Sig` | Max electron \|d0/σ\| (**sentinel** −999 for 4mu) |
-| `max_mu_d0Sig` | `llll_max_mu_d0Sig` | Max muon \|d0/σ\| (**sentinel** −999 for 4e) |
+| `max_el_d0Sig` | `llll_max_el_d0Sig` | Max electron \|d0/σ\| (**sentinel** 0.0 for 4mu — no electrons present) |
+| `max_mu_d0Sig` | `llll_max_mu_d0Sig` | Max muon \|d0/σ\| (**sentinel** 0.0 for 4e — no muons present) |
 | `nCTorSA` | `llll_nCTorSA` | Number of CT or SA muons |
 | `l_isIsolCloseBy` | `llll_l_isIsolCloseBy` | Isolation bitmask (15 = all isolated) |
 | `triggerMatched` | `llll_triggerMatched` | Trigger-match bitmask |
@@ -252,6 +285,17 @@ with the ZdZd13TeV tree convention.
 Columns marked **sentinel** contain placeholder values for certain quadruplet
 flavours and must be handled (excluded or imputed) in the training script
 before being passed to TMVA.
+
+**Sentinel value clarifications (confirmed from `ZdZdHelper.h`):**
+- `min_of_dR`: stored as 9999999 when no opposite-flavour pairs exist (4e or 4μ events)
+- `vtx_reduced_chi2`: stored as −999 when the vertex fit fails (~1% of events)
+- `max_el_d0Sig`: stored as **0.0** (not −999) for 4μ events — computed via
+  `std::max({pdgId!=11 ? 0.0 : |d0Sig|, ...})`, so the absence of electrons gives 0
+- `max_mu_d0Sig`: stored as **0.0** (not −999) for 4e events — same logic
+
+The 0.0 sentinel for d0Sig is physically interpretable (zero impact parameter
+significance) and does not create a discontinuous spike in the BDT training
+distributions, unlike −999 would have.
 
 ### Handling multiple mZd signal samples (option a)
 A single mZd-inclusive BDT is trained using all signal samples combined.
@@ -283,14 +327,14 @@ The following questions are open and must be answered before the corresponding
 development steps can proceed. They will be addressed one by one.
 
 ### Data (required before writing training script)
-- [ ] What is the TTree name in the analysis output `.root` file?
-- [ ] Are branches scalar (flat) or do they include vectors / object
-      collections (e.g. `std::vector<float>` per lepton)?
-- [ ] Are signal and background stored in **separate `.root` files**, or in
-      the **same file** distinguished by a label branch?
-- [ ] Does the TTree contain event weights? If so, which branch name(s)?
-- [ ] Which branches/variables should be used as BDT input features (e.g.
-      lepton pT, MET, dilepton mass, angular quantities)?
+- [x] What is the TTree name? → `Nominal/llllTree` inside the NTUP4L ROOT file
+- [x] Are branches scalar or vectors? → Vectors (`std::vector<>` per candidate); Stage 1
+      flattens to one row per event by selecting the first passing quadruplet.
+- [x] Signal and background in separate files? → Separate files; Stage 1 labels them
+      `label=1` (signal) and `label=0` (background) and combines in one Parquet.
+- [x] Event weights? → `evtWeight` (generator), `PileupWeight`, `llll_scaleFactor`
+      (per-quadruplet); combined as `evtWeight_total = evtWeight × PileupWeight × scaleFactor`.
+- [x] BDT input features? → Defined in Section 11 feature table (24 variables).
 
 ### Environment (required before running on lxplus)
 - [ ] What is the exact LCG/CVMFS setup command used on lxplus for this analysis?
@@ -298,10 +342,8 @@ development steps can proceed. They will be addressed one by one.
 - [ ] What grid submission system and tools will be used for large jobs?
 
 ### Physics & Analysis
-- [ ] What is the full list of cuts in the existing cutflow (to serve as a
-      baseline for comparison)?
-- [ ] What is the primary figure of merit for comparing the BDT to the cutflow
-      (e.g. S/√B, expected CLs limits)?
+- [x] Full cutflow list → Documented in Section 2 (confirmed from `ZdZdPlottingAlg.cxx`).
+- [ ] Primary figure of merit for BDT vs cutflow comparison (e.g. S/√B, expected CLs)?
 
 ### Team
 - [ ] Who will ultimately use and maintain this code?

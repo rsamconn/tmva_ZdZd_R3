@@ -53,9 +53,9 @@ BDT input features (all in MeV unless stated):
     vtx_reduced_chi2   float  quadruplet vertex fit reduced chi²
                                *** SENTINEL: -999 when fit did not converge ***
     max_el_d0Sig       float  max |d0/σ(d0)| for electrons in quadruplet
-                               *** SENTINEL: -999 for 4mu quads (no electrons) ***
+                               *** SENTINEL: 0.0 for 4mu quads (no electrons) ***
     max_mu_d0Sig       float  max |d0/σ(d0)| for muons in quadruplet
-                               *** SENTINEL: -999 for 4e quads (no muons) ***
+                               *** SENTINEL: 0.0 for 4e quads (no muons) ***
     nCTorSA            int    number of CT or SA muons in quadruplet
     l_isIsolCloseBy    int    isolation bitmask (15 = all four leptons isolated)
     triggerMatched     int    trigger-matching bitmask (non-zero = matched)
@@ -172,12 +172,13 @@ BRANCHES_OPTIONAL = [
     "truth_zdzd_avgM",   # present in signal MC; may be 0 in background MC
 ]
 
-# Columns whose values contain known sentinels – flagged for the training script
+# Columns whose values contain known sentinels – flagged for the training script.
+# Confirmed by inspecting both signal and background samples with uproot.
 SENTINEL_NOTES = {
     "min_of_dR":        "9999999 for 4e/4mu quads (no opposite-flavour pairs)",
-    "vtx_reduced_chi2": "-999 when vertex fit did not converge (~1% of events)",
-    "max_el_d0Sig":     "-999 for 4mu quads (no electrons)",
-    "max_mu_d0Sig":     "-999 for 4e quads (no muons)",
+    "vtx_reduced_chi2": "-999 when vertex fit did not converge (~1-4% of events)",
+    "max_el_d0Sig":     "0.0 for 4mu quads (no electrons present; computed via std::max with 0.0 fill)",
+    "max_mu_d0Sig":     "0.0 for 4e quads (no muons present; computed via std::max with 0.0 fill)",
 }
 
 
@@ -400,8 +401,8 @@ def process_file(root_path, label, tree_path):
             "min_of_dR":         of_dRs[i][q],    # *** SENTINEL: 9999999 for 4e/4mu ***
             "vtx_reduced_chi2":  chi2s[i][q],      # *** SENTINEL: -999 on failed fit ***
             # --- Impact parameter features ---
-            "max_el_d0Sig":      el_d0s[i][q],     # *** SENTINEL: -999 for 4mu ***
-            "max_mu_d0Sig":      mu_d0s[i][q],     # *** SENTINEL: -999 for 4e  ***
+            "max_el_d0Sig":      el_d0s[i][q],     # *** SENTINEL: 0.0 for 4mu (no electrons) ***
+            "max_mu_d0Sig":      mu_d0s[i][q],     # *** SENTINEL: 0.0 for 4e  (no muons)    ***
             # --- Lepton quality / isolation features ---
             "nCTorSA":           n_ctsa[i][q],
             "l_isIsolCloseBy":   isol[i][q],
