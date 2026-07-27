@@ -306,7 +306,12 @@ def run_training(args):
 
     # ── Set up output paths ──────────────────────────────────────────────────
     out_dir     = os.path.abspath(args.output_dir)
-    weights_dir = os.path.join(out_dir, "weights")
+    # TMVA builds the weights path as "<DataLoaderName>/weights/...", resolved
+    # relative to the current working directory.  The DataLoader name must be a
+    # plain token (no path separators) — see the note by the DataLoader call
+    # below.  We chdir into out_dir so weights land at out_dir/<dl_name>/weights.
+    dl_name     = "dataset"
+    weights_dir = os.path.join(out_dir, dl_name, "weights")
     trees_path  = os.path.join(out_dir, "training_trees.root")
     tmva_path   = os.path.join(out_dir, "TMVAClassification.root")
     os.makedirs(weights_dir, exist_ok=True)
@@ -357,10 +362,18 @@ def run_training(args):
 
     tmva_out = ROOT.TFile(tmva_path, "RECREATE")
 
-    # TMVA writes its weights XML relative to the DataLoader path.
-    # Passing the absolute weights_dir makes the output location explicit.
+    # IMPORTANT: the DataLoader name must be a PLAIN token with no path
+    # separators.  TMVA uses it both as (a) a TDirectory name inside the output
+    # ROOT file and (b) the on-disk folder that holds the weights XML.  Passing
+    # an absolute path (with '/') makes ROOT try to cd into a bogus nested
+    # directory ("Error in <TFile::cd>: Unknown directory Users"), which leaves
+    # MethodBase::BaseDir() null and segfaults inside TrainAllMethods().
+    # Instead we chdir into out_dir and pass a simple name, so the weights land
+    # at out_dir/<dl_name>/weights (tmva_path is absolute, so it is unaffected).
+    os.chdir(out_dir)
+
     factory    = ROOT.TMVA.Factory("TMVAClassification", tmva_out, FACTORY_OPTIONS)
-    dataloader = ROOT.TMVA.DataLoader(weights_dir)
+    dataloader = ROOT.TMVA.DataLoader(dl_name)
 
     # Register input variables
     for var in BDT_VARIABLES:
