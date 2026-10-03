@@ -103,8 +103,8 @@ Re-run training only (skip TTree writing, reuse existing trees file):
 REQUIREMENTS
 ------------
     ROOT >= 6.12 with TMVA, PyROOT, pandas, numpy, pyarrow
-    On lxplus:  source /cvmfs/sft.cern.ch/lcg/views/LCG_105/x86_64-el9-gcc13-opt/setup.sh
-    (or the LCG release used by this analysis)
+    On lxplus:  run `setupATLAS` beforehand; this script performs no setup of
+    its own.
 
 OUTPUT
 ------

@@ -10,16 +10,23 @@
 #   Stage 2  train_bdt.py                Parquet             -> TMVA BDT
 #   Stage 3  plot_bdt_output.py          TMVA output         -> PNG plots
 #
+# ENVIRONMENT
+#   This script sets up NOTHING.  Run `setupATLAS` (and whatever it brings in)
+#   BEFORE invoking it; the script only checks that what it needs is on the
+#   PATH and importable, and reports clearly if it is not.  Required: python3
+#   with uproot, awkward, numpy, pandas, pyarrow and matplotlib for Stages 0/1/3,
+#   and PyROOT with TMVA for Stage 2.
+#
 # SAMPLES (mc23a)
 #   Signal     : H->ZdZd->4l at mZd = 20, 30, 50 GeV (DSIDs 561509/561511/561515)
 #   Background : the four irreducible processes - H_ZZ_4l, ZZ_4l, Tribosons,
-#                ttbarZ - taken from cutflow_inputs.csv, with 701185 and 701190
-#                excluded on m4l-overlap grounds with the inclusive 701040
-#                Sh_llll sample.
+#                ttbarZ - taken from normalisation_inputs/cutflow_inputs.csv,
+#                with 701185 and 701190 excluded on m4l-overlap grounds with the
+#                inclusive 701040 Sh_llll sample.
 #
 # The background sample list is NOT hardcoded here: it is derived from the
-# production registry by Stage 0, so it tracks the registry rather than drifting
-# from it.  Only the signal DSIDs and the per-process event cap live in this file.
+# production registry by Stage 0.  Only the signal DSIDs and the per-process
+# event cap live in this file.
 #
 # NORMALISATION
 #   Stage 0 computes scale_d = L * sigma * k * eps_filt / SumW_total per sample
@@ -29,28 +36,28 @@
 #   flags it and Stage 0 prints a warning.
 #
 # Usage:
+#   setupATLAS
 #   bash run_bdt_irreducible_lxplus.sh
 # Optional overrides (environment variables):
 #   PROJECT_DIR=...      root of run3_ZdZd_project   (default: parent of this script)
-#   CUTFLOW_DIR=...      ZdZdPostProcessing/cutflow_automation
-#   LCG_VIEW=...         LCG view to source
+#   INPUT_DIR=...        normalisation CSVs          (default: <repo>/normalisation_inputs)
 #   CAMPAIGN=mc23a       MC campaign
 #   TARGET_PER_PROCESS=  selected events per background process (default 150000)
 #   CHUNK_STRIDE=        spread the sample across each merged file (default 4)
 #   WEIGHTING=           normalised | equal-process | raw  (default normalised)
+#   SKIP_ENV_CHECK=1     skip the dependency check below
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # 0. Configuration
 # ---------------------------------------------------------------------------
-PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-TMVA_DIR="${PROJECT_DIR}/tmva_ZdZd_R3"
+TMVA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "${TMVA_DIR}/.." && pwd)}"
+INPUT_DIR="${INPUT_DIR:-${TMVA_DIR}/normalisation_inputs}"
 CAMPAIGN="${CAMPAIGN:-mc23a}"
 TARGET_PER_PROCESS="${TARGET_PER_PROCESS:-150000}"
 CHUNK_STRIDE="${CHUNK_STRIDE:-4}"
 WEIGHTING="${WEIGHTING:-normalised}"
-
-CUTFLOW_DIR="${CUTFLOW_DIR:-${PROJECT_DIR}/background/current_code/ZdZdPostProcessing/cutflow_automation}"
 
 MANIFEST="${PROJECT_DIR}/data/training_ntuples/manifest_${CAMPAIGN}.csv"
 NTUPLE_OUT="${PROJECT_DIR}/data/training_ntuples/sig3_irreducible_${CAMPAIGN}.parquet"
@@ -62,42 +69,48 @@ SIG_DIR="${SIG_DIR:-${EOS_BASE}/signal_Ntuples/${CAMPAIGN}_p6697_noSyst}"
 # Signal DSIDs.  561509=mZd20, 561511=mZd30, 561515=mZd50.
 SIGNAL_DSIDS="${SIGNAL_DSIDS:-561509 561511 561515}"
 
-# LCG software view (provides ROOT+PyROOT+TMVA, uproot, awkward, matplotlib).
-LCG_VIEW="${LCG_VIEW:-LCG_105/x86_64-el9-gcc13-opt}"
+# ---------------------------------------------------------------------------
+# 1. Pre-flight checks (no setup is performed here)
+# ---------------------------------------------------------------------------
+echo "=== Pre-flight ==="
+echo "  repo        : ${TMVA_DIR}"
+echo "  project dir : ${PROJECT_DIR}"
+echo "  inputs      : ${INPUT_DIR}"
+echo "  python3     : $(command -v python3 || echo 'NOT FOUND')"
+echo "  root        : $(command -v root || echo 'not found (Stage 2 uses PyROOT)')"
 
-# ---------------------------------------------------------------------------
-# 1. Environment
-# ---------------------------------------------------------------------------
-echo "=== Setting up environment: ${LCG_VIEW} ==="
-LCG_SETUP="/cvmfs/sft.cern.ch/lcg/views/${LCG_VIEW}/setup.sh"
-if [[ ! -f "${LCG_SETUP}" ]]; then
-    echo "ERROR: LCG view setup not found: ${LCG_SETUP}" >&2
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: no python3 on PATH. Run setupATLAS first." >&2
     exit 1
 fi
-# shellcheck disable=SC1090
-source "${LCG_SETUP}"
 
-PYTHON_BIN="$(command -v python3 || true)"
-ROOT_BIN="$(command -v root || true)"
-echo "  python : ${PYTHON_BIN:-not found}"
-echo "  root   : ${ROOT_BIN:-not found}"
-
-# The 2026-08-03 run sourced this view and still got /usr/bin/python3, which is
-# the interpreter that segfaulted at TMVA teardown.  Fail loudly rather than
-# silently training under the system Python.
-if [[ "${PYTHON_BIN}" != /cvmfs/* ]]; then
-    echo "ERROR: python3 resolves to '${PYTHON_BIN}', not the LCG view." >&2
-    echo "       The view did not take effect. Check that \$LCG_VIEW exists and" >&2
-    echo "       that no earlier setup pinned PATH, or set ALLOW_SYSTEM_PYTHON=1" >&2
-    echo "       to proceed anyway." >&2
-    [[ "${ALLOW_SYSTEM_PYTHON:-0}" == "1" ]] || exit 1
-    echo "       ALLOW_SYSTEM_PYTHON=1 set; continuing with ${PYTHON_BIN}." >&2
+if [[ "${SKIP_ENV_CHECK:-0}" != "1" ]]; then
+    python3 - <<'PY' || { echo "       Run setupATLAS (and any lsetup it implies) before this script," >&2; echo "       or set SKIP_ENV_CHECK=1 to proceed anyway." >&2; exit 1; }
+import importlib, sys
+needed = {
+    "numpy": "Stages 0-3", "pandas": "Stages 1-2", "uproot": "Stages 1, 3",
+    "awkward": "Stage 1", "pyarrow": "Stage 1 (Parquet)",
+    "matplotlib": "Stage 3", "ROOT": "Stage 2 (PyROOT + TMVA)",
+}
+missing = []
+for mod, where in needed.items():
+    try:
+        m = importlib.import_module(mod)
+        print(f"  {mod:<12} {getattr(m, '__version__', 'ok'):<12} ({where})", flush=True)
+    except Exception:
+        missing.append((mod, where))
+if missing:
+    print("\nERROR: missing Python module(s):", file=sys.stderr)
+    for mod, where in missing:
+        print(f"  {mod:<12} needed for {where}", file=sys.stderr)
+    sys.exit(1)
+PY
 fi
 
 for f in cutflow_inputs.csv crossSections_run3.csv sumw_total_p7266.csv; do
-    if [[ ! -f "${CUTFLOW_DIR}/${f}" ]]; then
-        echo "ERROR: ${f} not found under ${CUTFLOW_DIR}" >&2
-        echo "       Set CUTFLOW_DIR to ZdZdPostProcessing/cutflow_automation." >&2
+    if [[ ! -f "${INPUT_DIR}/${f}" ]]; then
+        echo "ERROR: ${f} not found under ${INPUT_DIR}" >&2
+        echo "       See normalisation_inputs/README.md." >&2
         exit 1
     fi
 done
@@ -114,9 +127,9 @@ echo
 echo "=== Stage 0: make_sample_manifest.py ==="
 mkdir -p "$(dirname "${MANIFEST}")"
 python3 "${TMVA_DIR}/make_sample_manifest.py" \
-    --cutflow-inputs "${CUTFLOW_DIR}/cutflow_inputs.csv" \
-    --cross-sections "${CUTFLOW_DIR}/crossSections_run3.csv" \
-    --sumw           "${CUTFLOW_DIR}/sumw_total_p7266.csv" \
+    --cutflow-inputs "${INPUT_DIR}/cutflow_inputs.csv" \
+    --cross-sections "${INPUT_DIR}/crossSections_run3.csv" \
+    --sumw           "${INPUT_DIR}/sumw_total_p7266.csv" \
     --campaign       "${CAMPAIGN}" \
     --signal-dir     "${SIG_DIR}" \
     --signal-dsids   ${SIGNAL_DSIDS} \

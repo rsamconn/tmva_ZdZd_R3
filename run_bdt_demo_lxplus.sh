@@ -16,10 +16,16 @@
 # Each signal/background process is assumed to be a single merged Ntuple file.
 # Signal filenames carry a unique job ID, so they are resolved by a DSID glob.
 #
+# ENVIRONMENT
+#   This script sets up NOTHING.  Run `setupATLAS` (and whatever it brings in)
+#   BEFORE invoking it.  Needs python3 with uproot/awkward/numpy/pandas/pyarrow
+#   and matplotlib, plus PyROOT with TMVA for Stage 2.
+#
 # Usage:
+#   setupATLAS
 #   bash run_bdt_demo_lxplus.sh
 # Optional overrides (environment variables):
-#   PROJECT_DIR=/path/to/run3_ZdZd_project  LCG_VIEW=LCG_105/x86_64-el9-gcc13-opt
+#   PROJECT_DIR=/path/to/run3_ZdZd_project
 #
 set -euo pipefail
 
@@ -44,16 +50,17 @@ BACKGROUND_FILES=(
     "${BKG_DIR}/604263.PhPy8EG_Hto4l_NNLOPS_nnlo_30_ggH125_ZZ4l.mc23a.p7266.v1.root"
 )
 
-# LCG software view (provides ROOT+PyROOT+TMVA, uproot, awkward, matplotlib).
-LCG_VIEW="${LCG_VIEW:-LCG_105/x86_64-el9-gcc13-opt}"
 
 # ---------------------------------------------------------------------------
-# 1. Environment
+# 1. Pre-flight (no setup is performed here - run setupATLAS first)
 # ---------------------------------------------------------------------------
-echo "=== Setting up environment: ${LCG_VIEW} ==="
-source "/cvmfs/sft.cern.ch/lcg/views/${LCG_VIEW}/setup.sh"
-echo "  python : $(command -v python3)"
-echo "  root   : $(command -v root || echo 'not found')"
+echo "=== Pre-flight ==="
+echo "  python : $(command -v python3 || echo 'NOT FOUND')"
+echo "  root   : $(command -v root || echo 'not found (Stage 2 uses PyROOT)')"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: no python3 on PATH. Run setupATLAS first." >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Resolve signal files (one file per DSID, via glob)

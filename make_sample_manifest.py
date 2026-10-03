@@ -15,8 +15,14 @@ Writing it out as a file (rather than hardcoding paths in a driver script)
 keeps the sample list in one place, lets it be regenerated when the production
 registry changes, and makes the normalisation inputs auditable after the fact.
 
-INPUTS (all already exist in ZdZdPostProcessing/cutflow_automation/)
--------------------------------------------------------------------
+INPUTS
+------
+Three CSVs, copied into this repository under `normalisation_inputs/` so the
+pipeline is self-contained and does not depend on a sibling checkout of
+ZdZdPostProcessing being present.  They are the defaults for the three input
+options, resolved relative to this script, and each can still be overridden.
+See `normalisation_inputs/README.md` for provenance and how to refresh them.
+
     cutflow_inputs.csv        the production registry: process, DSID, campaign,
                               Merged_file_path, Ntuple_events
     crossSections_run3.csv    sigma, kFactor, genFiltEff, sigma_eff_pb per DSID
@@ -69,13 +75,13 @@ different mZd samples is set by their selection acceptance.  Use
 USAGE
 -----
     python3 make_sample_manifest.py \\
-        --cutflow-inputs  .../cutflow_automation/cutflow_inputs.csv \\
-        --cross-sections  .../cutflow_automation/crossSections_run3.csv \\
-        --sumw            .../cutflow_automation/sumw_total_p7266.csv \\
         --campaign        mc23a \\
         --signal-dir      /eos/.../signal_Ntuples/mc23a_p6697_noSyst \\
         --signal-dsids    561509 561511 561515 \\
         --output          data/training_ntuples/manifest_mc23a.csv
+
+with --cutflow-inputs / --cross-sections / --sumw only needed to point at
+copies other than the ones bundled in `normalisation_inputs/`.
 """
 
 import argparse
@@ -87,6 +93,14 @@ import sys
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+# The bundled normalisation inputs, resolved relative to this script so the
+# defaults work from any working directory.
+INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "normalisation_inputs")
+DEFAULT_CUTFLOW_INPUTS = os.path.join(INPUT_DIR, "cutflow_inputs.csv")
+DEFAULT_CROSS_SECTIONS = os.path.join(INPUT_DIR, "crossSections_run3.csv")
+DEFAULT_SUMW = os.path.join(INPUT_DIR, "sumw_total_p7266.csv")
 
 # Integrated luminosity per MC campaign, pb^-1, LAr-Corrected column.
 # Source: background/ATLAS_info/GRLs/GRL_calcs/, documented in
@@ -308,12 +322,17 @@ def parse_args(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--cutflow-inputs", required=True, metavar="CSV",
-                   help="cutflow_automation/cutflow_inputs.csv")
-    p.add_argument("--cross-sections", required=True, metavar="CSV",
-                   help="cutflow_automation/crossSections_run3.csv")
-    p.add_argument("--sumw", required=True, metavar="CSV",
-                   help="cutflow_automation/sumw_total_p7266.csv")
+    p.add_argument("--cutflow-inputs", default=DEFAULT_CUTFLOW_INPUTS,
+                   metavar="CSV",
+                   help="Production registry CSV "
+                        "(default: normalisation_inputs/cutflow_inputs.csv).")
+    p.add_argument("--cross-sections", default=DEFAULT_CROSS_SECTIONS,
+                   metavar="CSV",
+                   help="Cross-section CSV "
+                        "(default: normalisation_inputs/crossSections_run3.csv).")
+    p.add_argument("--sumw", default=DEFAULT_SUMW, metavar="CSV",
+                   help="SumW_total CSV "
+                        "(default: normalisation_inputs/sumw_total_p7266.csv).")
     p.add_argument("--campaign", default="mc23a", choices=sorted(LUMI_PB),
                    help="MC campaign to build the manifest for (default mc23a).")
     p.add_argument("--processes", nargs="+", default=DEFAULT_PROCESSES,
@@ -362,11 +381,17 @@ def main(argv=None):
 
     for path in (args.cutflow_inputs, args.cross_sections, args.sumw):
         if not os.path.exists(path):
-            sys.exit(f"ERROR: input not found: {path}")
+            sys.exit(
+                f"ERROR: input not found: {path}\n"
+                f"       The bundled copies live in {INPUT_DIR}; see its "
+                f"README.md for how they are refreshed.")
 
     lumi_pb = args.luminosity_pb
     if lumi_pb is None:
         lumi_pb = LUMI_PB[args.campaign]
+    print(f"Registry    : {args.cutflow_inputs}")
+    print(f"Cross-sect. : {args.cross_sections}")
+    print(f"SumW_total  : {args.sumw}")
     print(f"Campaign    : {args.campaign}")
     print(f"Luminosity  : {lumi_pb:,.1f} pb^-1")
     print(f"Processes   : {', '.join(args.processes)}")
