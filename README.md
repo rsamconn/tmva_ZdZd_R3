@@ -115,7 +115,10 @@ Local machine is used for small-scale testing only; the main workflow will take 
 - **Access:** `ssh <username>@lxplus.cern.ch`
 - **ROOT:** 6.38.04
 - **Python:** Python 3.9.25
-- **Working directory:** _To be filled in (e.g. `/afs/cern.ch/user/...`)_
+- **Setup:** `setupATLAS`, run by hand before any driver script. The scripts in
+  this repository perform **no** environment setup; they check their
+  dependencies and stop with a clear list if something is missing.
+- **Working directory:** `/eos/home-c/maroonturtle17/analyses-ATLAS/analysis-codes/`
 
 ### 5c. Grid submission (large-scale jobs)
 - **Grid system:** CERN/WLCG grid
@@ -143,6 +146,11 @@ tmva_ZdZd_R3/
 ├── run_bdt_irreducible_lxplus.sh  ← driver: signal + 4 irreducible backgrounds
 ├── run_bdt_demo_lxplus.sh         ← driver: the original 2-class demo
 ├── analyse_data_for_bdt.py        ← exploratory branch/variable study
+├── normalisation_inputs/          ← vendored registry + σ + ΣW_total CSVs
+│   ├── README.md                  ← provenance and refresh procedure
+│   ├── cutflow_inputs.csv
+│   ├── crossSections_run3.csv
+│   └── sumw_total_p7266.csv
 ├── dataset/weights/               ← TMVA output weights (gitignored)
 │   └── TMVAClassification_BDT.weights.xml
 └── plots/                         ← output figures (gitignored)
@@ -231,13 +239,22 @@ lxplus run, i.e. it silently removed the signal from the weighted training.
 
 ### Normalisation inputs
 
-All live in `ZdZdPostProcessing/cutflow_automation/`, with the luminosity from
-`claude/lumi_run3_grl_lumicalc.md` (26,328.8 / 25,204.3 / 107,890.0 pb⁻¹ for
-2022 / 2023 / 2024, i.e. mc23a / mc23d / mc23e):
+Three CSVs, **vendored into this repository** under `normalisation_inputs/` so
+the pipeline is self-contained on lxplus and does not need a sibling checkout of
+`ZdZdPostProcessing`. They are the defaults for Stage 0, resolved relative to
+`make_sample_manifest.py`, and each is overridable (`--cutflow-inputs`,
+`--cross-sections`, `--sumw`):
 
 - `cutflow_inputs.csv` — the production registry (process, DSID, campaign, path)
 - `crossSections_run3.csv` — σ, k-factor, filter efficiency per DSID
 - `sumw_total_p7266.csv` — `ΣW_total` per merged Ntuple (44 of 50 samples)
+
+`ZdZdPostProcessing/cutflow_automation/` remains the authority; see
+`normalisation_inputs/README.md` for the copy provenance (commit, MD5s) and how
+to refresh them. The luminosity is held in `LUMI_PB` in
+`make_sample_manifest.py`, from `claude/lumi_run3_grl_lumicalc.md`
+(26,328.8 / 25,204.3 / 107,890.0 pb⁻¹ for 2022 / 2023 / 2024, i.e.
+mc23a / mc23d / mc23e).
 
 ### Sample set and known caveats
 
@@ -275,8 +292,9 @@ All live in `ZdZdPostProcessing/cutflow_automation/`, with the luminosity from
 
 1. ROOT 6.26.06 on the local machine is compatible with the PyROOT TMVA
    interface used in this project (TMVA 4.3.0, requires ROOT ≥ 6.12).
-2. lxplus has ROOT available via CVMFS and scripts will be run with `python3`
-   after sourcing the appropriate LCG release.
+2. lxplus has ROOT and the required Python packages available after
+   `setupATLAS`, which is run by hand before any driver script; the scripts
+   themselves set up nothing and only verify their dependencies.
 3. **CONFIRMED**: The output TTree is `Nominal/llllTree` inside the NTUP4L ROOT
    file. Quadruplet quantities are stored as `vector<>` branches (one entry per
    quadruplet candidate per event); lepton/dilepton quantities are also vectors
@@ -416,10 +434,13 @@ development steps can proceed. They will be addressed one by one.
 
 ### Environment (required before running on lxplus)
 - [x] What is the exact LCG/CVMFS setup command used on lxplus for this analysis?
-      → `source /cvmfs/sft.cern.ch/lcg/views/LCG_105/x86_64-el9-gcc13-opt/setup.sh`.
-      The driver now *verifies* that `python3` resolves under `/cvmfs` afterwards:
-      the 2026-08-03 run sourced the view and still ran under `/usr/bin/python3`,
-      which is the interpreter that segfaulted at TMVA teardown.
+      → `setupATLAS`, run by hand before the drivers. **The scripts perform no
+      environment setup of their own.** They only check that `python3` is on the
+      PATH and that `numpy`, `pandas`, `uproot`, `awkward`, `pyarrow`,
+      `matplotlib` and `ROOT` all import, and stop with a list of what is missing
+      if not (`SKIP_ENV_CHECK=1` to bypass). That check replaces the LCG-view
+      sourcing the 2026-08-03 run used, which silently left Stage 2 running under
+      `/usr/bin/python3` — the interpreter that segfaulted at TMVA teardown.
 - [x] What is the working directory / AFS/EOS path for storing scripts and outputs?
       → `/eos/home-c/maroonturtle17/analyses-ATLAS/analysis-codes/` on lxplus.
 - [ ] What grid submission system and tools will be used for large jobs?
