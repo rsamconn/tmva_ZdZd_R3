@@ -132,20 +132,26 @@ Local machine is used for small-scale testing only; the main workflow will take 
 
 ## 6. Code Structure
 
-<!-- TO BE FILLED IN once scripts exist -->
-
 ```
 tmva_ZdZd_R3/
-├── README.md                  ← this file
-├── CLAUDE.md                  ← instructions for directing Claude when coding
-├── explore_data.py            ← inspect ROOT file structure (step 1)
-├── train_bdt.py               ← TMVA BDT training script (step 2)
-├── evaluate_bdt.py            ← ROC curves, feature importance (step 3)
-├── apply_bdt.py               ← apply trained weights to new data (step 4)
-├── weights/                   ← TMVA output weights directory
+├── README.md                      ← this file
+├── CLAUDE.md                      ← instructions for directing Claude when coding
+├── make_sample_manifest.py        ← Stage 0: registry → manifest + scale_d
+├── make_training_ntuples.py       ← Stage 1: ROOT → Parquet
+├── train_bdt.py                   ← Stage 2: Parquet → TMVA BDT
+├── plot_bdt_output.py             ← Stage 3: TMVA output → PNG plots
+├── run_bdt_irreducible_lxplus.sh  ← driver: signal + 4 irreducible backgrounds
+├── run_bdt_demo_lxplus.sh         ← driver: the original 2-class demo
+├── analyse_data_for_bdt.py        ← exploratory branch/variable study
+├── dataset/weights/               ← TMVA output weights (gitignored)
 │   └── TMVAClassification_BDT.weights.xml
-└── plots/                     ← output figures
+└── plots/                         ← output figures (gitignored)
 ```
+
+Generated outputs that are **not** tracked: `TMVAClassification.root`,
+`training_trees.root`, `process_map.json`, `dataset/`, `weights/`, `plots/`,
+and the Stage 0/1 Parquet and manifest files (which live under
+`<project>/data/training_ntuples/`). All are reproducible from the scripts.
 
 ---
 
@@ -169,18 +175,86 @@ The intended workflow is:
 
 ## 8. TMVA Configuration
 
-<!-- TO BE FILLED IN as decisions are made -->
-
 - **TMVA method:** `BDT`
-- **Key hyperparameters (initial defaults):**
-  - `NTrees`: _e.g. 850_
-  - `MaxDepth`: _e.g. 3_
-  - `AdaBoostBeta`: _e.g. 0.5_
-  - `nCuts`: _e.g. 20_
-  - _(to be tuned after initial training)_
-- **Train/test split:** _e.g. 70% training / 30% test_
-- **Input variable transformations:** _e.g. normalisation — to be decided_
-- **Output weights file:** `weights/TMVAClassification_BDT.weights.xml`
+- **Hyperparameters** (defined in `BDT_HYPERPARAMS`, `train_bdt.py`):
+  - `NTrees` = 850, `MaxDepth` = 3, `MinNodeSize` = 5%
+  - `BoostType` = AdaBoost, `AdaBoostBeta` = 0.5, `UseBaggedBoost` = False
+  - `SeparationType` = GiniIndex, `nCuts` = 20, `PruneMethod` = NoPruning
+  - `IgnoreNegWeightsInTraining` = True by default (`--neg-weights keep` to
+    disable) — three of the four irreducible processes are Sherpa and AdaBoost
+    is unstable with negative weights.
+- **Train/test split:** 50/50 on `eventNumber` parity (even → train, odd →
+  test). Deterministic and reproducible without a seed. Applied per process, so
+  every sample is split the same way.
+- **Input variable transformations:** none (`Transformations=I`).
+- **Class normalisation:** `NormMode=EqualNumEvents`. This rescales the signal
+  and background **class** totals to be equal; it applies one scale per class
+  and so does **not** disturb the composition *within* the background class.
+- **Spectators:** `process_id`, carried into `TrainTree`/`TestTree` without
+  entering the training so Stage 3 can break results down by process.
+- **Output weights file:** `dataset/weights/TMVAClassification_BDT.weights.xml`
+  (the DataLoader name must be a plain token — passing a path makes ROOT `cd`
+  through it and segfault in `TrainAllMethods()`).
+
+---
+
+## 8a. Background composition and event weighting
+
+Training against several background processes only means something if the
+processes enter in the proportion they actually occur. Three per-event columns
+carry that through the pipeline:
+
+| Column | Written by | Meaning |
+|---|---|---|
+| `evtWeight_total` | Stage 1 | raw MC weight, see below |
+| `scale_d` | Stage 0 → Stage 1 | `L × σ × k × ε_filt / ΣW_total` |
+| `sampling_fraction` | Stage 1 | fraction of that sample's entries read |
+
+Stage 2's `--weighting normalised` (the default) trains with
+`evtWeight_total × scale_d / sampling_fraction`, so each process contributes its
+expected yield at the campaign luminosity with the subsampling divided out.
+`--weighting equal-process` is an interim mode that gives every background
+process the same total weight; `--weighting raw` reproduces the pre-2026-10
+behaviour, in which the background mix is a function of MC statistics rather
+than of physics.
+
+**The raw weights follow the `cf_v2` convention** (`claude/cf_v2_weighting.md`):
+
+- background: `evtWeight × PileupWeight × llll_scaleFactor`
+- signal: `PileupWeight × llll_scaleFactor` — `evtWeight` is **not** applied.
+
+The ZdZd signal samples carry generator weights of order 1e-18 and the
+MC-Request team advised ignoring them. Applying them put the summed signal
+training weight at ~1e-13 against ~1e+07 for background in the 2026-08-03
+lxplus run, i.e. it silently removed the signal from the weighted training.
+`--signal-weight-mode legacy` reinstates the old behaviour for reproduction only.
+
+### Normalisation inputs
+
+All live in `ZdZdPostProcessing/cutflow_automation/`, with the luminosity from
+`claude/lumi_run3_grl_lumicalc.md` (26,328.8 / 25,204.3 / 107,890.0 pb⁻¹ for
+2022 / 2023 / 2024, i.e. mc23a / mc23d / mc23e):
+
+- `cutflow_inputs.csv` — the production registry (process, DSID, campaign, path)
+- `crossSections_run3.csv` — σ, k-factor, filter efficiency per DSID
+- `sumw_total_p7266.csv` — `ΣW_total` per merged Ntuple (44 of 50 samples)
+
+### Sample set and known caveats
+
+- The irreducible set is **H_ZZ_4l, ZZ_4l, Tribosons, ttbarZ**, matching
+  `cutflow_inputs.csv`. **701185 and 701190 are excluded** on m4l-overlap
+  grounds with the inclusive 701040 `Sh_llll` sample.
+- **603293 mc23a has no measured `ΣW_total`** (its `channelInfo` was written as
+  an empty stub). The accepted estimate `ΣW_total ≈ 18767`, believed ~0.4% high,
+  is applied by default; the manifest flags it in `sumw_estimated` and Stage 0
+  prints a warning. `--no-default-overrides` drops the sample instead.
+- **`killEvent` is not applied in these Ntuples**, so summing `H_ZZ_4l` with
+  `ZZ_4l` double counts the SM Higgs contribution — at m4l ≈ 125, exactly where
+  the signal sits. Accepted for now (`claude/cf_v2_production_report.md` §2);
+  it cannot be corrected after the fact, only regenerated. Deferred to a later
+  stage.
+- The FR zero-weight skim bias of `cf_v2_weighting.md` §2 does **not** affect
+  this training: those entries fail `passCleaning`, which Stage 1 applies.
 
 ---
 
@@ -305,6 +379,9 @@ BDT can learn mass dependence. For background samples this column defaults to 0.
 ### Signal / background labelling
 - `label = 1`: H→ZdZd→4ℓ signal MC (all mZd values, all MC campaigns)
 - `label = 0`: background MC (ZZ\*→4ℓ and other relevant backgrounds)
+- `process` / `process_id`: the physics process each row came from, so the four
+  irreducible backgrounds stay distinguishable downstream. Stage 2 writes one
+  background TTree per process and registers each with TMVA separately.
 - Signal and background files are processed separately and combined in the
   output Parquet. The training script feeds them to TMVA's separate signal and
   background TTrees.
@@ -333,17 +410,37 @@ development steps can proceed. They will be addressed one by one.
 - [x] Signal and background in separate files? → Separate files; Stage 1 labels them
       `label=1` (signal) and `label=0` (background) and combines in one Parquet.
 - [x] Event weights? → `evtWeight` (generator), `PileupWeight`, `llll_scaleFactor`
-      (per-quadruplet); combined as `evtWeight_total = evtWeight × PileupWeight × scaleFactor`.
+      (per-quadruplet). Background: `evtWeight × PileupWeight × scaleFactor`;
+      signal: `PileupWeight × scaleFactor` only. See Section 8a.
 - [x] BDT input features? → Defined in Section 11 feature table (24 variables).
 
 ### Environment (required before running on lxplus)
-- [ ] What is the exact LCG/CVMFS setup command used on lxplus for this analysis?
-- [ ] What is the working directory / AFS/EOS path for storing scripts and outputs?
+- [x] What is the exact LCG/CVMFS setup command used on lxplus for this analysis?
+      → `source /cvmfs/sft.cern.ch/lcg/views/LCG_105/x86_64-el9-gcc13-opt/setup.sh`.
+      The driver now *verifies* that `python3` resolves under `/cvmfs` afterwards:
+      the 2026-08-03 run sourced the view and still ran under `/usr/bin/python3`,
+      which is the interpreter that segfaulted at TMVA teardown.
+- [x] What is the working directory / AFS/EOS path for storing scripts and outputs?
+      → `/eos/home-c/maroonturtle17/analyses-ATLAS/analysis-codes/` on lxplus.
 - [ ] What grid submission system and tools will be used for large jobs?
 
 ### Physics & Analysis
 - [x] Full cutflow list → Documented in Section 2 (confirmed from `ZdZdPlottingAlg.cxx`).
 - [ ] Primary figure of merit for BDT vs cutflow comparison (e.g. S/√B, expected CLs)?
+
+### Known limitations of the current pipeline
+- [ ] **Stage 1 quadruplet selection is a Python event loop.** Fine with a
+      per-process cap; it will need vectorising (awkward mask over all
+      candidates → `ak.argmax` for the first passing one) before full-statistics
+      training, since 701040 mc23a alone is ~50M entries.
+- [ ] **`--target-selected-per-process` assumes the entries read are
+      representative.** `--chunk-stride` spreads the sample across each merged
+      file, and `--exact-sampling-fraction` measures the fraction by summed
+      weight rather than entry count, but neither is a random sample.
+- [ ] **`killEvent` / `ewWeight` / `qcdWeight` are not applied** (Section 8a).
+- [ ] **Only mc23a.** `scale_d` is per campaign against its own year's
+      luminosity; combining mc23a + mc23d + mc23e needs one manifest per
+      campaign, concatenated.
 
 ### Team
 - [ ] Who will ultimately use and maintain this code?

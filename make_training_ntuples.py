@@ -10,6 +10,20 @@ The Parquet file produced here is the input to the Stage 2 training script.
 All mass and momentum quantities are stored in MeV, consistent with the
 ZdZd13TeV tree convention.
 
+INPUT MODES
+-----------
+Manifest mode (preferred, multi-process):
+    --manifest data/training_ntuples/manifest_mc23a.csv
+A manifest built by make_sample_manifest.py.  Each row names one Ntuple, its
+physics process, its signal/background class and its normalisation factor
+`scale_d`.  Process identity and `scale_d` are carried through to the Parquet
+so Stage 2 can reproduce the physical background composition.
+
+Legacy mode (single background class, kept for the two-class demo):
+    --signal FILE [FILE ...] --background FILE [FILE ...]
+Every --background file is labelled as one undifferentiated background process
+("background") with scale_d = 1.0.
+
 SELECTIONS APPLIED
 ------------------
 Event preselection (all three must pass):
@@ -22,20 +36,56 @@ Quadruplet selection (first candidate per event passing both):
     Kinematic: pT(l1) >= 20 000 MeV   (leading lepton)
                pT(l2) >= 15 000 MeV   (subleading)
                pT(l3) >= 10 000 MeV   (subsubleading)
-    (l1–l4 are stored in pT-descending order within each quadruplet candidate,
+    (l1-l4 are stored in pT-descending order within each quadruplet candidate,
     matching the convention in ZdZdPP_alg.cxx.)
 
 No further cuts are applied so that the remaining selection quantities
-(isolation, dR, d0, trigger match, …) survive as BDT input features.
+(isolation, dR, d0, trigger match, ...) survive as BDT input features.
+
+EVENT WEIGHTS
+-------------
+Controlled by --signal-weight-mode, which follows the cf_v2 cutflow convention
+(see claude/cf_v2_weighting.md):
+
+    background : evtWeight * PileupWeight * llll_scaleFactor
+    signal     : PileupWeight * llll_scaleFactor          (mode "cf_v2", default)
+                 evtWeight * PileupWeight * llll_scaleFactor  (mode "legacy")
+
+`evtWeight` MUST NOT be applied to the ZdZd signal.  The signal samples carry
+generator weights of order 1e-18 and the MC-Request team advised ignoring them;
+cf_v2 does.  Applying them makes the summed signal training weight ~1e-13
+against ~1e+07 for background, i.e. it silently removes the signal from any
+weighted training.  Mode "legacy" exists only to reproduce the pre-2026-10 runs.
+
+SUBSAMPLING
+-----------
+--target-selected-per-process N stops reading a process once N events have been
+selected from it, so a "small sample of each background" is possible without
+reading tens of millions of entries.  Reading is chunked (--chunk-size) and can
+be strided (--chunk-stride) so the sample is spread through the merged file
+rather than taken from its first grid job alone.
+
+Each sample records the fraction of its entries actually read as
+`sampling_fraction`, which Stage 2 divides out.  Without that division a
+lightly-sampled process is under-represented by exactly the factor it was
+sampled by.  By default the fraction is the entry fraction
+(entries_read / entries_total), which assumes the entries read are
+representative of the whole file; --exact-sampling-fraction instead measures it
+as sum(evtWeight) over entries read divided by the same sum over all entries,
+at the cost of one extra single-branch pass over the file.
 
 OUTPUT COLUMNS
 --------------
 Metadata / labels (not BDT inputs):
     label              int    1 = signal, 0 = background
+    process            str    physics process (e.g. "ZZ_4l", "signal_mZd30")
+    process_id         int    small integer code for `process` (0 = signal)
     mc_channel_number  int    MC dataset number
     eventNumber        int    event number (for debugging / cross-checks)
     truth_zdzd_avgM    float  MeV  truth avg Zd mass (signal only; 0 for bkg)
-    evtWeight_total    float  evtWeight * PileupWeight * llll_scaleFactor
+    evtWeight_total    float  per-event weight, see EVENT WEIGHTS above
+    scale_d            float  L * sigma_eff / SumW_total for this sample
+    sampling_fraction  float  fraction of the sample's entries read (0,1]
 
 BDT input features (all in MeV unless stated):
     mu                 float  average interactions per bunch crossing (pile-up)
@@ -47,47 +97,51 @@ BDT input features (all in MeV unless stated):
     mad                float  MeV  alt. leading dilepton mass
     mbc                float  MeV  alt. subleading dilepton mass
     mcd_over_mab       float  dimensionless  mcd / mab  (MediumSR discriminant)
-    min_sf_dR          float  rad  min ΔR between same-flavour leptons
-    min_of_dR          float  rad  min ΔR between opp.-flavour leptons
+    min_sf_dR          float  rad  min dR between same-flavour leptons
+    min_of_dR          float  rad  min dR between opp.-flavour leptons
                                *** SENTINEL: 9999999 for 4e / 4mu quads ***
-    vtx_reduced_chi2   float  quadruplet vertex fit reduced chi²
+    vtx_reduced_chi2   float  quadruplet vertex fit reduced chi2
                                *** SENTINEL: -999 when fit did not converge ***
-    max_el_d0Sig       float  max |d0/σ(d0)| for electrons in quadruplet
+    max_el_d0Sig       float  max |d0/sigma(d0)| for electrons in quadruplet
                                *** SENTINEL: 0.0 for 4mu quads (no electrons) ***
-    max_mu_d0Sig       float  max |d0/σ(d0)| for muons in quadruplet
+    max_mu_d0Sig       float  max |d0/sigma(d0)| for muons in quadruplet
                                *** SENTINEL: 0.0 for 4e quads (no muons) ***
     nCTorSA            int    number of CT or SA muons in quadruplet
     l_isIsolCloseBy    int    isolation bitmask (15 = all four leptons isolated)
     triggerMatched     int    trigger-matching bitmask (non-zero = matched)
     is_4e              int    1 if pdgIdSum == 44 (eeee),  else 0
-    is_2e2mu           int    1 if pdgIdSum == 48 (eeμμ),  else 0
-    is_4mu             int    1 if pdgIdSum == 52 (μμμμ),  else 0
+    is_2e2mu           int    1 if pdgIdSum == 48 (eemumu), else 0
+    is_4mu             int    1 if pdgIdSum == 52 (mumumumu), else 0
     pT_l1              float  MeV  leading lepton pT
     pT_l2              float  MeV  subleading lepton pT
     pT_l3              float  MeV  subsubleading lepton pT
     pT_l4              float  MeV  trailing lepton pT
-    eta_l1             float  leading lepton η   (ordered same as pT_l*)
-    eta_l2             float  subleading lepton η
-    eta_l3             float  subsubleading lepton η
-    eta_l4             float  trailing lepton η
+    eta_l1             float  leading lepton eta   (ordered same as pT_l*)
+    eta_l2             float  subleading lepton eta
+    eta_l3             float  subsubleading lepton eta
+    eta_l4             float  trailing lepton eta
 
 Columns marked SENTINEL contain placeholder values for certain quadruplet
 flavours and must be handled (excluded or imputed) in the training script
 before being passed to TMVA.
 
+A provenance sidecar <output>.samples.json records, per sample, the path,
+process, class, scale_d, entries total/read, events selected, the sampling
+fraction and how it was measured.
+
 USAGE
 -----
-Signal + background (full training set):
+Manifest mode, 150k selected events per background process:
     python3 make_training_ntuples.py \\
-        --signal   path/to/sig_mZd30.root path/to/sig_mZd60.root \\
-        --background path/to/ZZstar_bkg.root \\
-        --output   data/training_ntuples/training.parquet
+        --manifest data/training_ntuples/manifest_mc23a.csv \\
+        --target-selected-per-process 150000 --chunk-stride 3 \\
+        --output   data/training_ntuples/sig3_irreducible_mc23a.parquet
 
-Signal only (initial testing without background):
+Legacy two-class mode:
     python3 make_training_ntuples.py \\
-        --signal   data/example_data/ZdZd13TeV/mc23a_mZd30/my.output.root \\
-                   data/example_data/ZdZd13TeV/mc23a_mZd60/my.output.root \\
-        --output   data/training_ntuples/signal_only_test.parquet
+        --signal     path/to/sig_mZd30.root \\
+        --background path/to/ZZstar_bkg.root \\
+        --output     data/training_ntuples/training.parquet
 
 REQUIREMENTS
 ------------
@@ -95,6 +149,9 @@ REQUIREMENTS
 """
 
 import argparse
+import csv
+import glob
+import json
 import os
 import sys
 
@@ -120,8 +177,12 @@ PT3_MIN_MEV = 10_000.0
 
 # pdgIdSum codes for the three quadruplet flavour types
 PDG_4E    = 44   # e e e e
-PDG_2E2MU = 48   # e e μ μ
-PDG_4MU   = 52   # μ μ μ μ
+PDG_2E2MU = 48   # e e mu mu
+PDG_4MU   = 52   # mu mu mu mu
+
+# Default entries per read chunk.  Large enough to amortise uproot's basket
+# decompression, small enough that a capped sample stops promptly.
+DEFAULT_CHUNK_SIZE = 250_000
 
 # Branches loaded from the tree.  truth_zdzd_avgM is in the OPTIONAL set
 # because background files may not always carry a meaningful value.
@@ -172,7 +233,7 @@ BRANCHES_OPTIONAL = [
     "truth_zdzd_avgM",   # present in signal MC; may be 0 in background MC
 ]
 
-# Columns whose values contain known sentinels – flagged for the training script.
+# Columns whose values contain known sentinels - flagged for the training script.
 # Confirmed by inspecting both signal and background samples with uproot.
 SENTINEL_NOTES = {
     "min_of_dR":        "9999999 for 4e/4mu quads (no opposite-flavour pairs)",
@@ -180,6 +241,121 @@ SENTINEL_NOTES = {
     "max_el_d0Sig":     "0.0 for 4mu quads (no electrons present; computed via std::max with 0.0 fill)",
     "max_mu_d0Sig":     "0.0 for 4e quads (no muons present; computed via std::max with 0.0 fill)",
 }
+
+MANIFEST_REQUIRED_COLUMNS = ["path", "process", "sample_class", "scale_d"]
+
+
+# ---------------------------------------------------------------------------
+# Sample description
+# ---------------------------------------------------------------------------
+
+class Sample:
+    """One manifest row, resolved to concrete files."""
+
+    def __init__(self, process, sample_class, paths, scale_d=1.0, dsid=None,
+                 campaign=None, notes=""):
+        self.process = process
+        self.sample_class = sample_class          # "signal" | "background"
+        self.paths = list(paths)
+        self.scale_d = float(scale_d)
+        self.dsid = dsid
+        self.campaign = campaign
+        self.notes = notes
+        # Filled in by processing
+        self.entries_total = 0
+        self.entries_read = 0
+        self.n_selected = 0
+        self.sumw_read = 0.0
+        self.sumw_all = None
+        self.sampling_fraction = 1.0
+        self.fraction_method = "entries"
+
+    @property
+    def label(self):
+        return 1 if self.sample_class == "signal" else 0
+
+    def __repr__(self):
+        return (f"Sample({self.process!r}, {self.sample_class!r}, "
+                f"{len(self.paths)} file(s), scale_d={self.scale_d:.4g})")
+
+
+def resolve_paths(spec):
+    """Expand a manifest path, which may be a glob (signal filenames carry a
+    per-job ID so they cannot be written out literally).
+
+    Background manifest rows hold exact merged-file paths; a glob there would
+    risk double counting against a per-merged-file SumW_total, so only expand
+    patterns that actually contain wildcards.
+    """
+    if any(ch in spec for ch in "*?["):
+        matches = sorted(glob.glob(spec))
+        if not matches:
+            raise FileNotFoundError(f"No files match pattern: {spec}")
+        return matches
+    if not os.path.exists(spec):
+        raise FileNotFoundError(f"ROOT file not found: {spec}")
+    return [spec]
+
+
+def read_manifest(path):
+    """Read a make_sample_manifest.py CSV into a list of Samples."""
+    with open(path, newline="") as fh:
+        reader = csv.DictReader(fh)
+        missing = [c for c in MANIFEST_REQUIRED_COLUMNS
+                   if c not in (reader.fieldnames or [])]
+        if missing:
+            raise KeyError(f"Manifest {path} is missing column(s): {missing}")
+        rows = list(reader)
+
+    if not rows:
+        raise ValueError(f"Manifest {path} contains no rows")
+
+    samples = []
+    for row in rows:
+        sample_class = row["sample_class"].strip().lower()
+        if sample_class not in ("signal", "background"):
+            raise ValueError(
+                f"Manifest {path}: sample_class must be 'signal' or "
+                f"'background', got {row['sample_class']!r}")
+        scale_d = float(row["scale_d"]) if row["scale_d"].strip() else 1.0
+        if scale_d <= 0:
+            raise ValueError(
+                f"Manifest {path}: non-positive scale_d for {row['path']}")
+        samples.append(Sample(
+            process=row["process"].strip(),
+            sample_class=sample_class,
+            paths=resolve_paths(row["path"].strip()),
+            scale_d=scale_d,
+            dsid=int(row["dsid"]) if row.get("dsid", "").strip() else None,
+            campaign=row.get("campaign", "").strip() or None,
+            notes=row.get("notes", "").strip(),
+        ))
+    return samples
+
+
+def samples_from_legacy_args(signal_files, background_files):
+    """Build Samples from the old --signal / --background file lists."""
+    samples = []
+    for path in signal_files or []:
+        samples.append(Sample("signal", "signal", resolve_paths(path)))
+    if background_files:
+        paths = []
+        for path in background_files:
+            paths.extend(resolve_paths(path))
+        samples.append(Sample("background", "background", paths))
+    return samples
+
+
+def assign_process_ids(samples):
+    """Map process names to small integers, signal first (0, 1, ... then bkg).
+
+    Written into the Parquet as `process_id` and carried into TMVA as a
+    spectator variable, so the per-process breakdown survives into the
+    TrainTree/TestTree that Stage 3 reads.
+    """
+    sig = sorted({s.process for s in samples if s.sample_class == "signal"})
+    bkg = sorted({s.process for s in samples if s.sample_class == "background"})
+    return {name: i for i, name in enumerate(sig + bkg)}
 
 
 # ---------------------------------------------------------------------------
@@ -217,53 +393,16 @@ def find_first_passing_quad(charges, dcharges, l1s, l2s, l3s, l_pts):
 
 
 # ---------------------------------------------------------------------------
-# Per-file processing
+# Per-chunk processing
 # ---------------------------------------------------------------------------
 
-def process_file(root_path, label, tree_path):
-    """Read one ROOT file and return a list of flat row dicts, one per
-    selected event.
+def rows_from_chunk(data, sample, process_id, use_evt_weight_for_signal):
+    """Apply preselection + quadruplet selection to one chunk of entries.
 
-    Parameters
-    ----------
-    root_path : str   path to the ZdZd13TeV output ROOT file
-    label     : int   1 = signal, 0 = background
-    tree_path : str   path to the TTree within the file
+    Returns (rows, n_presel, n_no_cands, n_no_pass).  `data` is the awkward
+    record array returned by tree.arrays() for an entry range.
     """
-    print(f"\n  File  : {root_path}")
-    print(f"  Label : {'signal (1)' if label == 1 else 'background (0)'}")
-
-    if not os.path.exists(root_path):
-        raise FileNotFoundError(f"ROOT file not found: {root_path}")
-
-    with uproot.open(root_path) as f:
-        if tree_path not in f:
-            raise KeyError(
-                f"Tree '{tree_path}' not found in {root_path}.\n"
-                f"Available keys: {[k for k in f.keys() if 'Tree' in k]}"
-            )
-        tree = f[tree_path]
-        n_total = tree.num_entries
-        print(f"  Entries in tree: {n_total:,}")
-
-        # Check for missing required branches
-        available = set(tree.keys())
-        missing_req = [b for b in BRANCHES_REQUIRED if b not in available]
-        if missing_req:
-            raise KeyError(
-                f"Required branches not found in {root_path}: {missing_req}"
-            )
-
-        # Load optional branches where present
-        branches_to_load = BRANCHES_REQUIRED + [
-            b for b in BRANCHES_OPTIONAL if b in available
-        ]
-        missing_opt = [b for b in BRANCHES_OPTIONAL if b not in available]
-        if missing_opt:
-            print(f"  Note: optional branches absent, defaulting to 0: "
-                  f"{missing_opt}")
-
-        data = tree.arrays(branches_to_load)
+    label = sample.label
 
     # -------------------------------------------------------------------------
     # Event-level preselection
@@ -274,9 +413,6 @@ def process_file(root_path, label, tree_path):
         & (data["passTriggers"] != 0)
     )
     n_presel = int(ak.sum(evt_mask))
-    print(f"  Pass preselection (clean + NPV + trigger): "
-          f"{n_presel:,} / {n_total:,} ({100*n_presel/n_total:.1f}%)")
-
     d = data[evt_mask]   # work only with preselected events from here on
 
     # -------------------------------------------------------------------------
@@ -295,7 +431,6 @@ def process_file(root_path, label, tree_path):
 
     # Feature arrays (per-quadruplet)
     l4s       = d["llll_l4"].tolist()
-    letas     = d["llll_l_isIsolCloseBy"].tolist()   # reused name below; alias set per row
     l_etas    = d["l_tlv_eta"].tolist()
     ll_ms     = d["ll_tlv_m"].tolist()
     ll1s      = d["llll_ll1"].tolist()
@@ -329,13 +464,12 @@ def process_file(root_path, label, tree_path):
     # Quadruplet selection + feature extraction loop
     # -------------------------------------------------------------------------
     # For each event take the first quadruplet candidate passing SFOS + pT cuts.
-    # A Python loop is used for clarity; for O(millions) of events this could
-    # be vectorised with awkward-array operations.
+    # A Python loop is used for clarity; see README "Known limitations" for the
+    # vectorisation that full-statistics training will need.
 
     rows       = []
     n_no_cands = 0
     n_no_pass  = 0
-    n_selected = 0
 
     for i in range(len(d)):
         if len(charges[i]) == 0:
@@ -373,18 +507,25 @@ def process_file(root_path, label, tree_path):
         mbc = ll_m_i[alt_ll2s[i][q]]
         mcd_over_mab = (mcd / mab) if mab > 0.0 else float("nan")
 
-        # Total event weight: evtWeight * PileupWeight * per-quad scaleFactor
-        weight = evt_wts[i] * pu_wts[i] * sfs[i][q]
+        # Total event weight.  The ZdZd signal generator weight (~1e-18) is
+        # dropped unless the legacy mode was asked for -- see EVENT WEIGHTS.
+        if label == 1 and not use_evt_weight_for_signal:
+            weight = pu_wts[i] * sfs[i][q]
+        else:
+            weight = evt_wts[i] * pu_wts[i] * sfs[i][q]
 
         pdg_sum = pdgsums[i][q]
 
         rows.append({
             # --- Metadata / labels ---
             "label":             label,
+            "process":           sample.process,
+            "process_id":        process_id,
             "mc_channel_number": mc_chans[i],
             "eventNumber":       evt_nums[i],
             "truth_zdzd_avgM":   truth_ms[i],
             "evtWeight_total":   weight,
+            "scale_d":           sample.scale_d,
             # --- Event-level features ---
             "mu":                mus[i],
             # --- Quadruplet mass features (MeV) ---
@@ -411,7 +552,7 @@ def process_file(root_path, label, tree_path):
             "is_4e":             int(pdg_sum == PDG_4E),
             "is_2e2mu":          int(pdg_sum == PDG_2E2MU),
             "is_4mu":            int(pdg_sum == PDG_4MU),
-            # --- Lepton kinematics (MeV; l1=leading → l4=trailing) ---
+            # --- Lepton kinematics (MeV; l1=leading -> l4=trailing) ---
             "pT_l1":             lpt_i[l1],
             "pT_l2":             lpt_i[l2],
             "pT_l3":             lpt_i[l3],
@@ -421,11 +562,148 @@ def process_file(root_path, label, tree_path):
             "eta_l3":            leta_i[l3],
             "eta_l4":            leta_i[l4],
         })
-        n_selected += 1
 
-    print(f"  No quadruplet candidates: {n_no_cands:,}")
-    print(f"  Candidates fail SFOS/pT:  {n_no_pass:,}")
-    print(f"  Selected events:          {n_selected:,}")
+    return rows, n_presel, n_no_cands, n_no_pass
+
+
+# ---------------------------------------------------------------------------
+# Chunk planning and per-sample processing
+# ---------------------------------------------------------------------------
+
+def plan_chunks(n_entries, chunk_size, stride):
+    """Return the (start, stop) entry ranges to read, in read order.
+
+    With stride > 1 the chunks are spread evenly through the file: the merged
+    Ntuples are hadd-ed from grid jobs in file order, so the first N entries are
+    not a random sample of the production.  Striding visits every `stride`-th
+    chunk first, then fills in the ones it skipped, so stopping early still
+    leaves a sample drawn from across the whole file while reading every entry
+    exactly once if the cap is never reached.
+    """
+    starts = list(range(0, n_entries, chunk_size))
+    if stride > 1:
+        ordered = []
+        for offset in range(stride):
+            ordered.extend(starts[offset::stride])
+        starts = ordered
+    return [(a, min(a + chunk_size, n_entries)) for a in starts]
+
+
+def sum_evt_weight(tree, chunk_size):
+    """Sum evtWeight over every entry of a tree, reading only that branch."""
+    total = 0.0
+    for a in range(0, tree.num_entries, chunk_size):
+        arr = tree["evtWeight"].array(
+            library="np", entry_start=a,
+            entry_stop=min(a + chunk_size, tree.num_entries))
+        total += float(np.sum(arr))
+    return total
+
+
+def process_sample(sample, process_id, tree_path, target_selected, chunk_size,
+                   chunk_stride, use_evt_weight_for_signal, exact_fraction):
+    """Read one Sample (possibly several files) and return its selected rows."""
+    print(f"\n  Sample : {sample.process}  [{sample.sample_class}]"
+          f"  scale_d = {sample.scale_d:.6g}")
+    if sample.notes:
+        print(f"  Note   : {sample.notes}")
+
+    rows = []
+    n_presel = n_no_cands = n_no_pass = 0
+
+    for path in sample.paths:
+        if target_selected and len(rows) >= target_selected:
+            print(f"  File   : {os.path.basename(path)}  (skipped, cap reached)")
+            continue
+
+        print(f"  File   : {path}")
+        with uproot.open(path) as f:
+            if tree_path not in f:
+                raise KeyError(
+                    f"Tree '{tree_path}' not found in {path}.\n"
+                    f"Available keys: {[k for k in f.keys() if 'Tree' in k]}"
+                )
+            tree = f[tree_path]
+            n_total = tree.num_entries
+            sample.entries_total += n_total
+            print(f"    Entries in tree: {n_total:,}")
+
+            # Check for missing required branches
+            available = set(tree.keys())
+            missing_req = [b for b in BRANCHES_REQUIRED if b not in available]
+            if missing_req:
+                raise KeyError(
+                    f"Required branches not found in {path}: {missing_req}")
+
+            branches_to_load = BRANCHES_REQUIRED + [
+                b for b in BRANCHES_OPTIONAL if b in available
+            ]
+            missing_opt = [b for b in BRANCHES_OPTIONAL if b not in available]
+            if missing_opt:
+                print(f"    Note: optional branches absent, defaulting to 0: "
+                      f"{missing_opt}")
+
+            if exact_fraction:
+                w_all = sum_evt_weight(tree, chunk_size)
+                sample.sumw_all = (sample.sumw_all or 0.0) + w_all
+                print(f"    sum(evtWeight) over all entries: {w_all:.6g}")
+
+            n_read_file = 0
+            for a, b in plan_chunks(n_total, chunk_size, chunk_stride):
+                data = tree.arrays(branches_to_load, entry_start=a, entry_stop=b)
+                sample.sumw_read += float(np.sum(ak.to_numpy(data["evtWeight"])))
+                n_read_file += (b - a)
+
+                chunk_rows, npre, nc, npass = rows_from_chunk(
+                    data, sample, process_id, use_evt_weight_for_signal)
+                rows.extend(chunk_rows)
+                n_presel += npre
+                n_no_cands += nc
+                n_no_pass += npass
+
+                if target_selected and len(rows) >= target_selected:
+                    print(f"    Reached cap of {target_selected:,} selected "
+                          f"events after {n_read_file:,} entries")
+                    break
+
+            sample.entries_read += n_read_file
+
+    # Trim to the cap so the sampling fraction and the row count agree.
+    if target_selected and len(rows) > target_selected:
+        rows = rows[:target_selected]
+
+    sample.n_selected = len(rows)
+
+    if sample.entries_total == 0:
+        raise ValueError(f"Sample {sample.process} has no entries")
+
+    if exact_fraction and sample.sumw_all not in (None, 0.0):
+        sample.sampling_fraction = sample.sumw_read / sample.sumw_all
+        sample.fraction_method = "sum(evtWeight)"
+    else:
+        sample.sampling_fraction = sample.entries_read / sample.entries_total
+        sample.fraction_method = "entries"
+
+    if not 0.0 < sample.sampling_fraction <= 1.0 + 1e-9:
+        print(f"    WARNING: sampling fraction {sample.sampling_fraction:.6g} "
+              f"outside (0, 1]; falling back to the entry fraction")
+        sample.sampling_fraction = sample.entries_read / sample.entries_total
+        sample.fraction_method = "entries (fallback)"
+    sample.sampling_fraction = min(sample.sampling_fraction, 1.0)
+
+    for row in rows:
+        row["sampling_fraction"] = sample.sampling_fraction
+
+    print(f"    Entries read            : {sample.entries_read:,}"
+          f" / {sample.entries_total:,}")
+    print(f"    Pass preselection       : {n_presel:,}"
+          f"  (clean + NPV + trigger)")
+    print(f"    No quadruplet candidates: {n_no_cands:,}")
+    print(f"    Candidates fail SFOS/pT : {n_no_pass:,}")
+    print(f"    Selected events         : {sample.n_selected:,}")
+    print(f"    Sampling fraction       : {sample.sampling_fraction:.6g}"
+          f"  ({sample.fraction_method})")
+
     return rows
 
 
@@ -443,6 +721,33 @@ FEATURE_COLS = [
     "pT_l1", "pT_l2", "pT_l3", "pT_l4",
     "eta_l1", "eta_l2", "eta_l3", "eta_l4",
 ]
+
+
+def print_process_table(df):
+    """Per-process event counts, raw and normalised weight sums, and N_eff."""
+    sep = "=" * 92
+    print(f"\n{sep}")
+    print("Per-process summary")
+    print(sep)
+    header = (f"  {'process':<18}{'class':<11}{'events':>10}{'sum w':>13}"
+              f"{'expected yield':>16}{'N_eff':>10}{'neg w':>9}")
+    print(header)
+
+    for proc, g in df.groupby("process", sort=True):
+        cls = "signal" if int(g["label"].iloc[0]) == 1 else "background"
+        w = g["evtWeight_total"].to_numpy(dtype=float)
+        norm = w * g["scale_d"].to_numpy(dtype=float) \
+                 / g["sampling_fraction"].to_numpy(dtype=float)
+        sw, sw2 = norm.sum(), np.square(norm).sum()
+        n_eff = (sw * sw / sw2) if sw2 > 0 else 0.0
+        n_neg = int((w < 0).sum())
+        print(f"  {proc:<18}{cls:<11}{len(g):>10,}{w.sum():>13.4g}"
+              f"{sw:>16.6g}{n_eff:>10.1f}"
+              f"{100.0 * n_neg / len(g):>8.2f}%")
+
+    print("\n  'expected yield' = sum(w * scale_d / sampling_fraction), i.e. the")
+    print("  weight Stage 2 trains with.  For background it is the yield at the")
+    print("  campaign luminosity; for signal scale_d = 1 and it is not a yield.")
 
 
 def print_summary(df):
@@ -483,11 +788,49 @@ def print_summary(df):
                 print(f"    {col}: {note}")
 
 
+def write_sidecar(path, samples, process_ids, args):
+    """Write per-sample provenance next to the Parquet."""
+    payload = {
+        "output": os.path.abspath(args.output),
+        "tree": args.tree,
+        "signal_weight_mode": args.signal_weight_mode,
+        "target_selected_per_process": args.target_selected_per_process,
+        "chunk_size": args.chunk_size,
+        "chunk_stride": args.chunk_stride,
+        "exact_sampling_fraction": bool(args.exact_sampling_fraction),
+        "manifest": os.path.abspath(args.manifest) if args.manifest else None,
+        "process_ids": process_ids,
+        "samples": [
+            {
+                "process": s.process,
+                "process_id": process_ids[s.process],
+                "sample_class": s.sample_class,
+                "dsid": s.dsid,
+                "campaign": s.campaign,
+                "paths": s.paths,
+                "scale_d": s.scale_d,
+                "entries_total": s.entries_total,
+                "entries_read": s.entries_read,
+                "n_selected": s.n_selected,
+                "sumw_read": s.sumw_read,
+                "sumw_all": s.sumw_all,
+                "sampling_fraction": s.sampling_fraction,
+                "fraction_method": s.fraction_method,
+                "notes": s.notes,
+            }
+            for s in samples
+        ],
+    }
+    with open(path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    print(f"Written: {path}  (per-sample provenance)")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description=(
             "Stage 1 of the TMVA pipeline: convert ZdZd13TeV ROOT ntuples "
@@ -497,12 +840,18 @@ def parse_args():
         epilog=__doc__,
     )
     p.add_argument(
+        "--manifest", metavar="CSV", default=None,
+        help="Sample manifest from make_sample_manifest.py (preferred). "
+             "Mutually exclusive with --signal/--background.",
+    )
+    p.add_argument(
         "--signal", nargs="+", metavar="FILE",
-        help="One or more signal ROOT files (H→ZdZd→4ℓ MC).",
+        help="Legacy mode: one or more signal ROOT files (H->ZdZd->4l MC).",
     )
     p.add_argument(
         "--background", nargs="+", metavar="FILE", default=[],
-        help="One or more background ROOT files (e.g. ZZ*→4ℓ MC).",
+        help="Legacy mode: one or more background ROOT files, all labelled as "
+             "a single undifferentiated background process.",
     )
     p.add_argument(
         "--output", required=True, metavar="FILE",
@@ -512,30 +861,104 @@ def parse_args():
         "--tree", default=TREE_PATH,
         help=f"TTree path within the ROOT file (default: {TREE_PATH}).",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--signal-weight-mode", choices=["cf_v2", "legacy"], default="cf_v2",
+        help="cf_v2 (default): signal weight = PileupWeight * llll_scaleFactor, "
+             "dropping the ~1e-18 ZdZd generator weight, as cf_v2 does. "
+             "legacy: also multiply by evtWeight (reproduces pre-2026-10 runs; "
+             "sinks the signal in any weighted training).",
+    )
+    p.add_argument(
+        "--target-selected-per-process", type=int, default=0, metavar="N",
+        help="Stop reading a process once N events have been selected from it. "
+             "0 (default) reads every entry.",
+    )
+    p.add_argument(
+        "--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, metavar="N",
+        help=f"Entries per read chunk (default {DEFAULT_CHUNK_SIZE:,}).",
+    )
+    p.add_argument(
+        "--chunk-stride", type=int, default=1, metavar="K",
+        help="Visit every K-th chunk first, so a capped sample is drawn from "
+             "across the merged file rather than from its first grid job. "
+             "Default 1 (sequential).",
+    )
+    p.add_argument(
+        "--exact-sampling-fraction", action="store_true",
+        help="Measure the sampling fraction as sum(evtWeight) read / "
+             "sum(evtWeight) total instead of the entry fraction. Costs one "
+             "extra single-branch pass over each file.",
+    )
+    return p.parse_args(argv)
 
 
-def main():
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
 
-    if not args.signal and not args.background:
-        print("ERROR: at least one --signal or --background file is required.",
-              file=sys.stderr)
-        sys.exit(1)
+    if args.manifest and (args.signal or args.background):
+        sys.exit("ERROR: --manifest cannot be combined with "
+                 "--signal/--background.")
+    if not args.manifest and not args.signal and not args.background:
+        sys.exit("ERROR: provide --manifest, or at least one --signal or "
+                 "--background file.")
+    if args.chunk_size < 1:
+        sys.exit("ERROR: --chunk-size must be >= 1.")
+    if args.chunk_stride < 1:
+        sys.exit("ERROR: --chunk-stride must be >= 1.")
+
+    if args.manifest:
+        if not os.path.exists(args.manifest):
+            sys.exit(f"ERROR: manifest not found: {args.manifest}")
+        samples = read_manifest(args.manifest)
+        print(f"Manifest: {args.manifest}  ({len(samples)} samples)")
+    else:
+        samples = samples_from_legacy_args(args.signal, args.background)
+        print(f"Legacy mode: {len(samples)} sample group(s)")
+
+    process_ids = assign_process_ids(samples)
+    print(f"Process IDs: {process_ids}")
+    print(f"Signal weight mode: {args.signal_weight_mode}")
+    if args.signal_weight_mode == "legacy":
+        print("  WARNING: legacy mode applies the ~1e-18 ZdZd generator weight "
+              "to signal; see EVENT WEIGHTS in this script's docstring.")
+
+    # The per-process cap is a cap per PROCESS, not per file, so group the
+    # manifest rows by process before reading.
+    by_process = {}
+    for s in samples:
+        by_process.setdefault(s.process, []).append(s)
 
     all_rows = []
+    use_evt_w_sig = (args.signal_weight_mode == "legacy")
 
-    if args.signal:
-        print(f"\nProcessing {len(args.signal)} signal file(s):")
-        for path in args.signal:
-            all_rows.extend(process_file(path, label=1,
-                                         tree_path=args.tree))
-
-    if args.background:
-        print(f"\nProcessing {len(args.background)} background file(s):")
-        for path in args.background:
-            all_rows.extend(process_file(path, label=0,
-                                         tree_path=args.tree))
+    for proc in sorted(by_process, key=lambda p: process_ids[p]):
+        proc_samples = by_process[proc]
+        # The cap is per PROCESS but it is spent per SAMPLE, because each DSID
+        # of a process has its own scale_d and its own sampling fraction.
+        # Splitting it evenly (and rolling unused quota forward) keeps every
+        # DSID represented; filling the cap from the first DSID alone would
+        # silently drop the others' cross-sections from the background mix.
+        remaining = args.target_selected_per_process
+        n_left = len(proc_samples)
+        for s in proc_samples:
+            if args.target_selected_per_process:
+                quota = max(1, -(-remaining // n_left)) if remaining > 0 else 0
+            else:
+                quota = 0
+            if args.target_selected_per_process and quota == 0:
+                print(f"\n  Sample : {s.process} [{s.sample_class}] "
+                      f"- skipped, process cap already filled")
+                n_left -= 1
+                continue
+            rows = process_sample(
+                s, process_ids[proc], args.tree, quota,
+                args.chunk_size, args.chunk_stride, use_evt_w_sig,
+                args.exact_sampling_fraction,
+            )
+            all_rows.extend(rows)
+            if args.target_selected_per_process:
+                remaining -= len(rows)
+            n_left -= 1
 
     if not all_rows:
         print("ERROR: no events survived selection. "
@@ -544,6 +967,7 @@ def main():
 
     df = pd.DataFrame(all_rows)
     print_summary(df)
+    print_process_table(df)
 
     # Write output, creating intermediate directories if needed
     out_dir = os.path.dirname(os.path.abspath(args.output))
@@ -552,6 +976,8 @@ def main():
     size_kb = os.path.getsize(args.output) / 1024
     print(f"\nWritten: {args.output}  ({size_kb:.0f} kB, {len(df):,} rows, "
           f"{len(df.columns)} columns)")
+
+    write_sidecar(args.output + ".samples.json", samples, process_ids, args)
 
 
 if __name__ == "__main__":

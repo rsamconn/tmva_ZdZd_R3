@@ -4,6 +4,18 @@
 # Figures and plots
 plots/*
 
+# TMVA generated outputs (all reproducible from the scripts)
+TMVAClassification.root
+training_trees.root
+process_map.json
+dataset/
+weights/
+
+# Stage 0/1 products, when written inside the repo rather than ../data/
+*.parquet
+*.parquet.samples.json
+manifest_*.csv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
