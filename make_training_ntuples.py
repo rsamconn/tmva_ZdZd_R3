@@ -72,14 +72,25 @@ ZZ_4l (49.7M entries in 701040 alone) still capped:
 
     --target-selected-per-process 0 --process-cap ZZ_4l=150000
 
-Each sample records the fraction of its entries actually read as
-`sampling_fraction`, which Stage 2 divides out.  Without that division a
-lightly-sampled process is under-represented by exactly the factor it was
-sampled by.  By default the fraction is the entry fraction
-(entries_read / entries_total), which assumes the entries read are
-representative of the whole file; --exact-sampling-fraction instead measures it
-as sum(evtWeight) over entries read divided by the same sum over all entries,
-at the cost of one extra single-branch pass over the file.
+Each sample records how heavily it was subsampled as `sampling_fraction`, which
+Stage 2 divides out.  Without that division a lightly-sampled process is
+under-represented by exactly the factor it was sampled by.  It has TWO factors:
+
+    sampling_fraction = read_fraction x keep_fraction
+
+`read_fraction` is the entries actually read over the entries in the file (or,
+with --exact-sampling-fraction, sum(evtWeight) over the two, at the cost of one
+extra single-branch pass).  `keep_fraction` is the selected events kept after
+the cap trim over the selected events found in the entries read: a cap is
+normally reached part-way through a chunk, and the whole of that chunk has
+already been selected, so the trim discards selected events too.
+
+Leaving `keep_fraction` out was a real bug, fixed 2026-10-04.  In the
+2026-10-03 run every H_ZZ_4l sample hit its 18,750-event cap inside a single
+250k-entry chunk holding 82-127k selected events, so 79-85% of what had been
+selected was thrown away unaccounted for, and the process' expected yield came
+out 4.58x too low.  Any Parquet written before that date has capped processes
+under-weighted by their trim factor and should be regenerated.
 
 OUTPUT COLUMNS
 --------------
@@ -288,6 +299,9 @@ class Sample:
         self.entries_total = 0
         self.entries_read = 0
         self.n_selected = 0
+        self.n_selected_raw = 0
+        self.read_fraction = 1.0
+        self.keep_fraction = 1.0
         self.sumw_read = 0.0
         self.sumw_all = None
         self.sampling_fraction = 1.0
@@ -737,28 +751,52 @@ def process_sample(sample, process_id, tree_path, target_selected, chunk_size,
     else:
         df = pd.DataFrame()
 
-    # Trim to the cap so the sampling fraction and the row count agree.
+    # Events selected from the entries that were read, BEFORE the cap trim.
+    sample.n_selected_raw = len(df)
+
+    # Trim to the cap.  Take an evenly spaced subsample rather than the first
+    # N rows: the rows are in file order, so keeping the head would stack a
+    # within-chunk head bias on top of the chunk-level one.
     if target_selected and len(df) > target_selected:
-        df = df.iloc[:target_selected].reset_index(drop=True)
+        idx = np.unique(
+            np.linspace(0, len(df) - 1, target_selected).astype(np.int64))
+        df = df.iloc[idx].reset_index(drop=True)
 
     sample.n_selected = len(df)
 
     if sample.entries_total == 0:
         raise ValueError(f"Sample {sample.process} has no entries")
 
+    # The sampling fraction has TWO factors, and both must be divided out in
+    # Stage 2 or a capped sample is under-weighted:
+    #
+    #   read_fraction  the entries (or summed weight) actually read
+    #   keep_fraction  the selected events kept after the cap trim
+    #
+    # Using read_fraction alone was a real bug: in the 2026-10-03 run every
+    # H_ZZ_4l sample hit its 18,750 cap inside a single 250k-entry chunk, which
+    # had ~85-127k selected events in it, so the trim discarded 79-85% of what
+    # had been selected and nothing accounted for it.  The process' expected
+    # yield came out 4.58x too low (13.57 against the 62.11 the uncapped
+    # 2026-10-04 run gives), which is exactly the mean trim factor.
     if exact_fraction and sample.sumw_all not in (None, 0.0):
-        sample.sampling_fraction = sample.sumw_read / sample.sumw_all
+        read_fraction = sample.sumw_read / sample.sumw_all
         sample.fraction_method = "sum(evtWeight)"
     else:
-        sample.sampling_fraction = sample.entries_read / sample.entries_total
+        read_fraction = sample.entries_read / sample.entries_total
         sample.fraction_method = "entries"
 
-    if not 0.0 < sample.sampling_fraction <= 1.0 + 1e-9:
-        print(f"    WARNING: sampling fraction {sample.sampling_fraction:.6g} "
-              f"outside (0, 1]; falling back to the entry fraction")
-        sample.sampling_fraction = sample.entries_read / sample.entries_total
+    if not 0.0 < read_fraction <= 1.0 + 1e-9:
+        print(f"    WARNING: read fraction {read_fraction:.6g} outside (0, 1]; "
+              f"falling back to the entry fraction")
+        read_fraction = sample.entries_read / sample.entries_total
         sample.fraction_method = "entries (fallback)"
-    sample.sampling_fraction = min(sample.sampling_fraction, 1.0)
+
+    sample.read_fraction = min(read_fraction, 1.0)
+    sample.keep_fraction = (
+        sample.n_selected / sample.n_selected_raw) if sample.n_selected_raw else 1.0
+    sample.sampling_fraction = min(
+        sample.read_fraction * sample.keep_fraction, 1.0)
 
     if len(df):
         df["sampling_fraction"] = np.float64(sample.sampling_fraction)
@@ -769,9 +807,21 @@ def process_sample(sample, process_id, tree_path, target_selected, chunk_size,
           f"  (clean + NPV + trigger)")
     print(f"    No quadruplet candidates: {n_no_cands:,}")
     print(f"    Candidates fail SFOS/pT : {n_no_pass:,}")
-    print(f"    Selected events         : {sample.n_selected:,}")
-    print(f"    Sampling fraction       : {sample.sampling_fraction:.6g}"
+    if sample.n_selected_raw != sample.n_selected:
+        print(f"    Selected events         : {sample.n_selected:,}"
+              f"  (trimmed from {sample.n_selected_raw:,} by the cap)")
+    else:
+        print(f"    Selected events         : {sample.n_selected:,}")
+    print(f"    Read fraction           : {sample.read_fraction:.6g}"
           f"  ({sample.fraction_method})")
+    print(f"    Keep fraction (cap trim): {sample.keep_fraction:.6g}")
+    print(f"    Sampling fraction       : {sample.sampling_fraction:.6g}"
+          f"  = read x keep")
+    if sample.keep_fraction < 0.5:
+        print(f"    NOTE: the cap discarded "
+              f"{100 * (1 - sample.keep_fraction):.1f}% of the events selected "
+              f"from the entries read. Lower --chunk-size so the cap is reached "
+              f"over more, smaller chunks.")
 
     return df
 
@@ -882,6 +932,9 @@ def write_sidecar(path, samples, process_ids, args):
                 "entries_total": s.entries_total,
                 "entries_read": s.entries_read,
                 "n_selected": s.n_selected,
+                "n_selected_raw": s.n_selected_raw,
+                "read_fraction": s.read_fraction,
+                "keep_fraction": s.keep_fraction,
                 "sumw_read": s.sumw_read,
                 "sumw_all": s.sumw_all,
                 "sampling_fraction": s.sampling_fraction,

@@ -517,7 +517,16 @@ answer.  All four are motivated by the `partial_ZZ_4l` predecessor run
 - [ ] **`--target-selected-per-process` assumes the entries read are
       representative.** `--chunk-stride` spreads the sample across each merged
       file, and `--exact-sampling-fraction` measures the fraction by summed
-      weight rather than entry count, but neither is a random sample.
+      weight rather than entry count, but neither is a random sample. The
+      stride also only engages when the cap is *not* reached inside the first
+      chunk, so lower `--chunk-size` when capping small.
+- [x] **The cap trim was not in `sampling_fraction`** (fixed 2026-10-04). A cap
+      is reached part-way through a chunk whose events have all been selected,
+      so the trim discards selected events as well as leaving entries unread.
+      `sampling_fraction` is now `read_fraction x keep_fraction`; before the fix
+      a capped process was under-weighted by its trim factor, 4.58x for
+      `H_ZZ_4l` in the 2026-10-03 run. **Any Parquet written before 2026-10-04
+      has capped processes under-weighted and should be regenerated.**
 - [ ] **`killEvent` / `ewWeight` / `qcdWeight` are not applied** (Section 8a).
 - [ ] **Only mc23a.** `scale_d` is per campaign against its own year's
       luminosity; combining mc23a + mc23d + mc23e needs one manifest per
