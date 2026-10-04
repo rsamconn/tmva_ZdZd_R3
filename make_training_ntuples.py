@@ -61,9 +61,16 @@ SUBSAMPLING
 -----------
 --target-selected-per-process N stops reading a process once N events have been
 selected from it, so a "small sample of each background" is possible without
-reading tens of millions of entries.  Reading is chunked (--chunk-size) and can
-be strided (--chunk-stride) so the sample is spread through the merged file
-rather than taken from its first grid job alone.
+reading tens of millions of entries.  0 means no cap.  Reading is chunked
+(--chunk-size) and can be strided (--chunk-stride) so the sample is spread
+through the merged file rather than taken from its first grid job alone.
+
+--process-cap NAME=N overrides the cap for one process, which is how a run can
+read some processes in full while keeping an expensive one partial.  For
+example, every mc23a entry of signal, H_ZZ_4l, Tribosons and ttbarZ, with
+ZZ_4l (49.7M entries in 701040 alone) still capped:
+
+    --target-selected-per-process 0 --process-cap ZZ_4l=150000
 
 Each sample records the fraction of its entries actually read as
 `sampling_fraction`, which Stage 2 divides out.  Without that division a
@@ -243,6 +250,22 @@ SENTINEL_NOTES = {
 }
 
 MANIFEST_REQUIRED_COLUMNS = ["path", "process", "sample_class", "scale_d"]
+
+# Column dtypes for the per-chunk DataFrames.  Rows are converted chunk by
+# chunk rather than accumulated as one list of dicts: a list of dicts costs
+# roughly an order of magnitude more memory per row than a typed frame, and an
+# uncapped run over the full mc23a set is ~2M rows.  Weight and bookkeeping
+# columns stay float64 because scale_d spans ~1e-8 to ~4e-2 and the sums that
+# Stage 2 takes over them need the headroom; the BDT features go to float32,
+# which is what Stage 2 writes into the TTrees anyway.
+INT_COLUMNS = [
+    "label", "process_id", "mc_channel_number", "eventNumber",
+    "nCTorSA", "l_isIsolCloseBy", "triggerMatched",
+    "is_4e", "is_2e2mu", "is_4mu",
+]
+FLOAT64_COLUMNS = [
+    "evtWeight_total", "scale_d", "sampling_fraction", "truth_zdzd_avgM",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +593,43 @@ def rows_from_chunk(data, sample, process_id, use_evt_weight_for_signal):
 # Chunk planning and per-sample processing
 # ---------------------------------------------------------------------------
 
+def rows_to_frame(rows):
+    """Convert a chunk's row dicts to a typed DataFrame (see the dtype note)."""
+    df = pd.DataFrame(rows)
+    for col in INT_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].astype("int64")
+    for col in df.columns:
+        if col in INT_COLUMNS or col in FLOAT64_COLUMNS or col == "process":
+            continue
+        df[col] = df[col].astype("float32")
+    for col in FLOAT64_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].astype("float64")
+    if "process" in df.columns:
+        df["process"] = df["process"].astype("category")
+    return df
+
+
+def parse_process_caps(specs):
+    """Parse --process-cap NAME=N into {process: cap}."""
+    out = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise SystemExit(
+                f"ERROR: bad --process-cap '{spec}'; expected PROCESS=N")
+        name, value = spec.split("=", 1)
+        try:
+            cap = int(value)
+        except ValueError:
+            raise SystemExit(
+                f"ERROR: bad --process-cap '{spec}'; N must be an integer")
+        if cap < 0:
+            raise SystemExit(f"ERROR: --process-cap '{spec}' must be >= 0")
+        out[name.strip()] = cap
+    return out
+
+
 def plan_chunks(n_entries, chunk_size, stride):
     """Return the (start, stop) entry ranges to read, in read order.
 
@@ -608,11 +668,12 @@ def process_sample(sample, process_id, tree_path, target_selected, chunk_size,
     if sample.notes:
         print(f"  Note   : {sample.notes}")
 
-    rows = []
+    frames = []
+    n_rows = 0
     n_presel = n_no_cands = n_no_pass = 0
 
     for path in sample.paths:
-        if target_selected and len(rows) >= target_selected:
+        if target_selected and n_rows >= target_selected:
             print(f"  File   : {os.path.basename(path)}  (skipped, cap reached)")
             continue
 
@@ -656,23 +717,31 @@ def process_sample(sample, process_id, tree_path, target_selected, chunk_size,
 
                 chunk_rows, npre, nc, npass = rows_from_chunk(
                     data, sample, process_id, use_evt_weight_for_signal)
-                rows.extend(chunk_rows)
                 n_presel += npre
                 n_no_cands += nc
                 n_no_pass += npass
+                if chunk_rows:
+                    frames.append(rows_to_frame(chunk_rows))
+                    n_rows += len(chunk_rows)
+                del data, chunk_rows
 
-                if target_selected and len(rows) >= target_selected:
+                if target_selected and n_rows >= target_selected:
                     print(f"    Reached cap of {target_selected:,} selected "
                           f"events after {n_read_file:,} entries")
                     break
 
             sample.entries_read += n_read_file
 
-    # Trim to the cap so the sampling fraction and the row count agree.
-    if target_selected and len(rows) > target_selected:
-        rows = rows[:target_selected]
+    if frames:
+        df = pd.concat(frames, ignore_index=True)
+    else:
+        df = pd.DataFrame()
 
-    sample.n_selected = len(rows)
+    # Trim to the cap so the sampling fraction and the row count agree.
+    if target_selected and len(df) > target_selected:
+        df = df.iloc[:target_selected].reset_index(drop=True)
+
+    sample.n_selected = len(df)
 
     if sample.entries_total == 0:
         raise ValueError(f"Sample {sample.process} has no entries")
@@ -691,8 +760,8 @@ def process_sample(sample, process_id, tree_path, target_selected, chunk_size,
         sample.fraction_method = "entries (fallback)"
     sample.sampling_fraction = min(sample.sampling_fraction, 1.0)
 
-    for row in rows:
-        row["sampling_fraction"] = sample.sampling_fraction
+    if len(df):
+        df["sampling_fraction"] = np.float64(sample.sampling_fraction)
 
     print(f"    Entries read            : {sample.entries_read:,}"
           f" / {sample.entries_total:,}")
@@ -704,7 +773,7 @@ def process_sample(sample, process_id, tree_path, target_selected, chunk_size,
     print(f"    Sampling fraction       : {sample.sampling_fraction:.6g}"
           f"  ({sample.fraction_method})")
 
-    return rows
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +802,7 @@ def print_process_table(df):
               f"{'expected yield':>16}{'N_eff':>10}{'neg w':>9}")
     print(header)
 
-    for proc, g in df.groupby("process", sort=True):
+    for proc, g in df.groupby("process", sort=True, observed=True):
         cls = "signal" if int(g["label"].iloc[0]) == 1 else "background"
         w = g["evtWeight_total"].to_numpy(dtype=float)
         norm = w * g["scale_d"].to_numpy(dtype=float) \
@@ -795,6 +864,7 @@ def write_sidecar(path, samples, process_ids, args):
         "tree": args.tree,
         "signal_weight_mode": args.signal_weight_mode,
         "target_selected_per_process": args.target_selected_per_process,
+        "process_cap": parse_process_caps(args.process_cap),
         "chunk_size": args.chunk_size,
         "chunk_stride": args.chunk_stride,
         "exact_sampling_fraction": bool(args.exact_sampling_fraction),
@@ -874,6 +944,12 @@ def parse_args(argv=None):
              "0 (default) reads every entry.",
     )
     p.add_argument(
+        "--process-cap", nargs="*", default=[], metavar="PROC=N",
+        help="Override --target-selected-per-process for one process, e.g. "
+             "'ZZ_4l=150000'. Use 0 for no cap. Repeatable; lets a run read "
+             "some processes in full while keeping an expensive one partial.",
+    )
+    p.add_argument(
         "--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, metavar="N",
         help=f"Entries per read chunk (default {DEFAULT_CHUNK_SIZE:,}).",
     )
@@ -928,44 +1004,59 @@ def main(argv=None):
     for s in samples:
         by_process.setdefault(s.process, []).append(s)
 
-    all_rows = []
+    process_caps = parse_process_caps(args.process_cap)
+    unknown_caps = [p for p in process_caps if p not in by_process]
+    if unknown_caps:
+        print(f"  WARNING: --process-cap names not in the manifest: "
+              f"{unknown_caps}  (known: {sorted(by_process)})")
+
+    frames = []
     use_evt_w_sig = (args.signal_weight_mode == "legacy")
 
     for proc in sorted(by_process, key=lambda p: process_ids[p]):
         proc_samples = by_process[proc]
+        proc_cap = process_caps.get(proc, args.target_selected_per_process)
+        if proc in process_caps:
+            print(f"\n  [{proc}] cap overridden: "
+                  f"{proc_cap:,} selected events"
+                  if proc_cap else f"\n  [{proc}] cap overridden: no cap")
         # The cap is per PROCESS but it is spent per SAMPLE, because each DSID
         # of a process has its own scale_d and its own sampling fraction.
         # Splitting it evenly (and rolling unused quota forward) keeps every
         # DSID represented; filling the cap from the first DSID alone would
         # silently drop the others' cross-sections from the background mix.
-        remaining = args.target_selected_per_process
+        remaining = proc_cap
         n_left = len(proc_samples)
         for s in proc_samples:
-            if args.target_selected_per_process:
+            if proc_cap:
                 quota = max(1, -(-remaining // n_left)) if remaining > 0 else 0
             else:
                 quota = 0
-            if args.target_selected_per_process and quota == 0:
+            if proc_cap and quota == 0:
                 print(f"\n  Sample : {s.process} [{s.sample_class}] "
                       f"- skipped, process cap already filled")
                 n_left -= 1
                 continue
-            rows = process_sample(
+            sample_df = process_sample(
                 s, process_ids[proc], args.tree, quota,
                 args.chunk_size, args.chunk_stride, use_evt_w_sig,
                 args.exact_sampling_fraction,
             )
-            all_rows.extend(rows)
-            if args.target_selected_per_process:
-                remaining -= len(rows)
+            if len(sample_df):
+                frames.append(sample_df)
+            if proc_cap:
+                remaining -= len(sample_df)
             n_left -= 1
 
-    if not all_rows:
+    if not frames:
         print("ERROR: no events survived selection. "
               "Check input files and selection cuts.", file=sys.stderr)
         sys.exit(1)
 
-    df = pd.DataFrame(all_rows)
+    df = pd.concat(frames, ignore_index=True)
+    del frames
+    if "process" in df.columns:
+        df["process"] = df["process"].astype("category")
     print_summary(df)
     print_process_table(df)
 

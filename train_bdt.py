@@ -103,8 +103,8 @@ Re-run training only (skip TTree writing, reuse existing trees file):
 REQUIREMENTS
 ------------
     ROOT >= 6.12 with TMVA, PyROOT, pandas, numpy, pyarrow
-    On lxplus:  run `setupATLAS` beforehand; this script performs no setup of
-    its own.
+    On lxplus:  source /cvmfs/sft.cern.ch/lcg/views/LCG_105/x86_64-el9-gcc13-opt/setup.sh
+    (or the LCG release used by this analysis)
 
 OUTPUT
 ------
@@ -263,7 +263,7 @@ def compute_train_weights(df, mode, signal_equalise):
 def process_diagnostics(df, weight_col=WEIGHT_COL):
     """Per-process event counts, weight sums, N_eff and negative fraction."""
     out = []
-    for proc, g in df.groupby("process", sort=True):
+    for proc, g in df.groupby("process", sort=True, observed=True):
         w = g[weight_col].to_numpy(dtype=float)
         sw, sw2 = float(w.sum()), float(np.square(w).sum())
         out.append({

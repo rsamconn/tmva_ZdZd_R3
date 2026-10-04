@@ -10,6 +10,7 @@ training_trees.root
 process_map.json
 dataset/
 weights/
+runs/
 
 # Stage 0/1 products, when written inside the repo rather than ../data/
 *.parquet

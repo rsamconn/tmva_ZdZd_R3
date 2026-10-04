@@ -125,10 +125,15 @@ SUMW_OVERRIDES = {
     (603293, "mc23a"): 18_767.0,
 }
 
-# Signal DSID -> mZd [GeV], from production_lists.txt / signal_mc23_DAODs.txt.
+# Signal DSID -> mZd [GeV].  The full mc23 grid is 14 contiguous DSIDs,
+# 561504-561517.  Taken from
+#   ZdZd_R3_production/production_lists.txt/signal_mc23_DAODs_ALL.txt
+# (dataset names of the form ...<DSID>.MGPy8EG_ZdZd_4l_Signal_mS125_mZd<M>...).
+# Note the grid is NOT uniformly spaced below 15 GeV.
 SIGNAL_MZD = {
-    561504: 5, 561505: 8, 561506: 10, 561507: 12, 561508: 15, 561509: 20,
-    561511: 30, 561515: 50, 561516: 55, 561517: 60,
+    561504: 5,  561505: 6,  561506: 8,  561507: 12, 561508: 15,
+    561509: 20, 561510: 25, 561511: 30, 561512: 35, 561513: 40,
+    561514: 45, 561515: 50, 561516: 55, 561517: 60,
 }
 
 DEFAULT_SIGNAL_PATTERN = "user.*.{dsid}.*.my.output.root"
@@ -245,12 +250,42 @@ def build_background_rows(registry, xsec, sumw, campaign, processes,
     return rows, skipped
 
 
+def filter_signal_by_mass(dsids, min_mzd, max_mzd):
+    """Restrict signal DSIDs to a mZd range.  Returns (kept, dropped).
+
+    The analysis splits at 15 GeV into a Low Mass region (mZd < 15) and a High
+    Mass region (mZd >= 15), and the two have quite different signal kinematics
+    -- at low mZd the two dilepton pairs are strongly collimated.  Training one
+    classifier across the split blurs it, so a run usually wants one side.
+
+    A DSID with no entry in SIGNAL_MZD cannot be checked against the cut and is
+    dropped rather than assumed to pass.
+    """
+    if min_mzd is None and max_mzd is None:
+        return list(dsids), []
+    kept, dropped = [], []
+    for dsid in dsids:
+        mzd = SIGNAL_MZD.get(dsid)
+        if mzd is None:
+            dropped.append((dsid, None, "mZd unknown, cannot apply the cut"))
+        elif min_mzd is not None and mzd < min_mzd:
+            dropped.append((dsid, mzd, f"mZd < {min_mzd:g} GeV"))
+        elif max_mzd is not None and mzd > max_mzd:
+            dropped.append((dsid, mzd, f"mZd > {max_mzd:g} GeV"))
+        else:
+            kept.append(dsid)
+    return kept, dropped
+
+
 def build_signal_rows(signal_dir, signal_dsids, pattern, campaign, equalise):
     """Build the signal manifest rows.  `path` stays a glob for Stage 1."""
     rows = []
     for dsid in signal_dsids:
         mzd = SIGNAL_MZD.get(dsid)
-        name = f"signal_mZd{mzd}" if mzd else f"signal_{dsid}"
+        # Zero-padded to two digits so the 14 mass points sort by mass rather
+        # than lexically everywhere downstream (process_id assignment, the
+        # per-process tables, the Stage 3 legends).
+        name = f"signal_mZd{mzd:02d}" if mzd else f"signal_{dsid}"
         rows.append({
             "path": os.path.join(signal_dir, pattern.format(dsid=dsid)),
             "process": name,
@@ -350,8 +385,16 @@ def parse_args(argv=None):
                    help="Extra SumW_total overrides, e.g. 603293:mc23a=18767.")
     p.add_argument("--signal-dir", default=None, metavar="DIR",
                    help="Directory holding the signal Ntuples.")
-    p.add_argument("--signal-dsids", nargs="*", type=int, default=[],
-                   metavar="DSID", help="Signal DSIDs to include.")
+    p.add_argument("--signal-dsids", nargs="*", default=[], metavar="DSID",
+                   help="Signal DSIDs to include, or the literal 'all' for the "
+                        f"whole mZd grid ({min(SIGNAL_MZD)}-{max(SIGNAL_MZD)}, "
+                        f"{len(SIGNAL_MZD)} DSIDs).")
+    p.add_argument("--signal-min-mzd", type=float, default=None, metavar="GEV",
+                   help="Drop signal samples below this mZd in GeV. The "
+                        "analysis splits Low/High Mass at 15 GeV, so "
+                        "--signal-min-mzd 15 gives the High Mass grid.")
+    p.add_argument("--signal-max-mzd", type=float, default=None, metavar="GEV",
+                   help="Drop signal samples above this mZd in GeV.")
     p.add_argument("--signal-pattern", default=DEFAULT_SIGNAL_PATTERN,
                    help="Signal filename glob, with {dsid} substituted "
                         f"(default: {DEFAULT_SIGNAL_PATTERN}).")
@@ -416,8 +459,41 @@ def main(argv=None):
     if args.signal_dsids:
         if not args.signal_dir:
             sys.exit("ERROR: --signal-dsids requires --signal-dir.")
+        if len(args.signal_dsids) == 1 and str(args.signal_dsids[0]).lower() == "all":
+            signal_dsids = sorted(SIGNAL_MZD)
+            print(f"\n  Signal: the full mZd grid, {len(signal_dsids)} DSIDs "
+                  f"({signal_dsids[0]}-{signal_dsids[-1]}), "
+                  f"mZd = {', '.join(str(SIGNAL_MZD[d]) for d in signal_dsids)} GeV")
+        else:
+            try:
+                signal_dsids = [int(d) for d in args.signal_dsids]
+            except ValueError:
+                sys.exit("ERROR: --signal-dsids takes integers, or 'all'.")
+            unknown = [d for d in signal_dsids if d not in SIGNAL_MZD]
+            if unknown:
+                print(f"\n  WARNING: DSID(s) {unknown} are not in the known mZd "
+                      f"grid; they will be named signal_<DSID>.")
+
+        signal_dsids, dropped = filter_signal_by_mass(
+            signal_dsids, args.signal_min_mzd, args.signal_max_mzd)
+        if dropped:
+            cut = []
+            if args.signal_min_mzd is not None:
+                cut.append(f"mZd >= {args.signal_min_mzd:g} GeV")
+            if args.signal_max_mzd is not None:
+                cut.append(f"mZd <= {args.signal_max_mzd:g} GeV")
+            print(f"\n  Signal mass cut ({' and '.join(cut)}): "
+                  f"dropped {len(dropped)} DSID(s)")
+            for dsid, mzd, why in dropped:
+                shown = f"mZd = {mzd} GeV" if mzd is not None else "mZd unknown"
+                print(f"    {dsid}  {shown:<16} {why}")
+            print(f"  Kept {len(signal_dsids)}: "
+                  f"mZd = {', '.join(str(SIGNAL_MZD[d]) for d in signal_dsids)} GeV")
+        if not signal_dsids:
+            sys.exit("ERROR: the signal mass cut removed every signal sample.")
+
         sig_rows = build_signal_rows(
-            args.signal_dir, args.signal_dsids, args.signal_pattern,
+            args.signal_dir, signal_dsids, args.signal_pattern,
             args.campaign, args.signal_equalise,
         )
     else:
