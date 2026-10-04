@@ -151,15 +151,34 @@ tmva_ZdZd_R3/
 │   ├── cutflow_inputs.csv
 │   ├── crossSections_run3.csv
 │   └── sumw_total_p7266.csv
-├── dataset/weights/               ← TMVA output weights (gitignored)
-│   └── TMVAClassification_BDT.weights.xml
-└── plots/                         ← output figures (gitignored)
+└── runs/<RUN_NAME>/               ← one directory per training run (gitignored)
+    ├── TMVAClassification.root
+    ├── training_trees.root
+    ├── process_map.json
+    ├── dataset/weights/TMVAClassification_BDT.weights.xml
+    └── plots/
 ```
 
-Generated outputs that are **not** tracked: `TMVAClassification.root`,
-`training_trees.root`, `process_map.json`, `dataset/`, `weights/`, `plots/`,
-and the Stage 0/1 Parquet and manifest files (which live under
+Generated outputs are **not** tracked: everything under `runs/`, plus the legacy
+top-level `dataset/`, `weights/` and `plots/` from before runs were separated,
+and the Stage 0/1 manifest and Parquet (which live under
 `<project>/data/training_ntuples/`). All are reproducible from the scripts.
+
+### Running stages separately
+
+`RUN_NAME` keeps each run's outputs apart, and `STAGES` selects which stages to
+run. The stages communicate through files, not shell state, so any subset works
+provided the earlier stage's output already exists on disk:
+
+```bash
+setupATLAS
+STAGES="0 1"  bash run_bdt_irreducible_lxplus.sh   # manifest + Parquet
+STAGES="2"    bash run_bdt_irreducible_lxplus.sh   # train from that Parquet
+STAGES="3"    bash run_bdt_irreducible_lxplus.sh   # re-plot from that training
+```
+
+The pre-flight refuses a stage whose input is missing and names the stage to run
+first, so a wrong selection fails immediately rather than part-way through.
 
 ---
 
@@ -448,6 +467,47 @@ development steps can proceed. They will be addressed one by one.
 ### Physics & Analysis
 - [x] Full cutflow list → Documented in Section 2 (confirmed from `ZdZdPlottingAlg.cxx`).
 - [ ] Primary figure of merit for BDT vs cutflow comparison (e.g. S/√B, expected CLs)?
+
+### Improvements
+
+Four changes to try next, in rough order of how much they would change the
+answer.  All four are motivated by the `partial_ZZ_4l` predecessor run
+(2026-10-03), in which the BDT reached ROC 0.999 against a background that was
+98.4% `ZZ_4l` by expected yield, while rejecting `H_ZZ_4l` 27 times less well.
+
+- [ ] **Train inside the H window.** Training currently runs with no `m_4l` cut,
+      so the signal sits at 125 GeV against a `ZZ_4l` continuum spread over
+      hundreds of GeV and `m_4l` is the top-ranked discriminant by a wide margin.
+      That is free performance the signal region's own H-window cut already
+      provides, and it inflates the apparent ROC. Restricting training (or at
+      least the quoted performance) to 115-130 GeV would make `H_ZZ_4l` the
+      dominant background by weight and force the BDT to learn something the cut
+      flow does not already do.
+
+- [ ] **Train without the eta variables.** `eta_l1`-`eta_l4` and `mu` together
+      take ~26% of the BDT's method-specific importance while their
+      method-unspecific separation is 1e-2 or below — AdaBoost spending its late
+      trees splitting on noise. Lepton pseudorapidity and pile-up are also where
+      MC mismodelling lives, so a classifier leaning on them is unlikely to
+      transfer to data. Retrain without them (and without `nCTorSA`, whose
+      importance was exactly zero) and check what, if anything, is lost.
+
+- [ ] **Train without the mass variables.** The complement of the H-window test:
+      drop `m_4l`, `mab`, `mcd`, `avgM`, `dM`, `mad`, `mbc` and `mcd_over_mab`
+      and see whether any discrimination survives. If performance collapses, the
+      BDT is only reproducing a mass window and the remaining variables are
+      carrying nothing; if it does not, those variables are where the genuine
+      gain over the cut-based analysis lives. Either outcome is informative, and
+      it is the cheapest way to find out.
+
+- [ ] **Use `--weighting equal-process` as a diagnostic.** The default
+      `normalised` weighting is physically right but lets `ZZ_4l` dominate the
+      training at 98.4% of the background weight, so the other three processes
+      barely constrain the classifier. Running the same configuration with
+      `equal-process`, which gives each background process the same total weight,
+      shows how much of the result is driven by that dominance. A large change in
+      `H_ZZ_4l` rejection between the two would argue for an intermediate
+      weighting rather than either extreme.
 
 ### Known limitations of the current pipeline
 - [ ] **Stage 1 quadruplet selection is a Python event loop.** Fine with a
